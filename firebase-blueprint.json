@@ -1,0 +1,357 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Public marketplace catalog item with specs, pricing, stock, and gallery images.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "number", "description": "Numeric catalog identifier" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "cat": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "emoji": { "type": "string", "minLength": 1, "maxLength": 16 },
+        "price": { "type": "number", "description": "Current selling price in BRL" },
+        "old": { "type": "number", "description": "Original price before discount (0 if none)" },
+        "rating": { "type": "string", "minLength": 1, "maxLength": 16 },
+        "reviews": { "type": "number" },
+        "featured": { "type": "boolean" },
+        "desc": { "type": "string", "maxLength": 2000 },
+        "image": { "type": "string", "maxLength": 500 },
+        "images": { "type": "array", "description": "Up to 10 gallery image paths/URLs" },
+        "stock": { "type": "number" },
+        "sold": { "type": "number" },
+        "warranty": { "type": "string", "maxLength": 120 },
+        "condition": { "type": "string", "maxLength": 120 },
+        "specs": { "type": "array", "description": "Up to 15 label/value technical specification entries" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "name",
+        "cat",
+        "emoji",
+        "price",
+        "old",
+        "rating",
+        "reviews",
+        "featured",
+        "desc",
+        "image",
+        "images",
+        "stock",
+        "sold",
+        "warranty",
+        "condition",
+        "specs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ProductCost": {
+      "title": "ProductCost",
+      "description": "Admin-only wholesale cost tracking for net profit calculations.",
+      "type": "object",
+      "properties": {
+        "productId": { "type": "number" },
+        "costPrice": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["productId", "costPrice", "updatedAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated customer profile with PII isolated to owner and admin.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "photoUrl": { "type": "string", "maxLength": 500 },
+        "cep": { "type": "string", "maxLength": 20 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "name", "email", "createdAt", "updatedAt"]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Trusted admin role assignment document.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Customer purchase order with shipping, payment, line items, and fulfillment status.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "minLength": 3, "maxLength": 40 },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "customerEmail": { "type": "string", "format": "email", "maxLength": 160 },
+        "customerName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "customerCpf": { "type": "string", "maxLength": 30 },
+        "customerPhone": { "type": "string", "minLength": 5, "maxLength": 30 },
+        "cep": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "address": { "type": "string", "minLength": 3, "maxLength": 300 },
+        "cityState": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "shippingMethod": { "type": "string", "enum": ["express", "standard"] },
+        "shippingLabel": { "type": "string", "maxLength": 120 },
+        "shippingCost": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["pix", "card", "boleto"] },
+        "paymentStatus": { "type": "string", "enum": ["pending", "paid", "refunded"] },
+        "couponCode": { "type": "string", "maxLength": 40 },
+        "subtotal": { "type": "number" },
+        "discount": { "type": "number" },
+        "total": { "type": "number" },
+        "statusStep": { "type": "number" },
+        "trackingCode": { "type": "string", "maxLength": 60 },
+        "items": { "type": "array", "description": "Purchased items (1..50)" },
+        "createdAtLabel": { "type": "string", "maxLength": 60 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "code",
+        "userId",
+        "customerEmail",
+        "customerName",
+        "customerCpf",
+        "customerPhone",
+        "cep",
+        "address",
+        "cityState",
+        "shippingMethod",
+        "shippingLabel",
+        "shippingCost",
+        "paymentMethod",
+        "paymentStatus",
+        "couponCode",
+        "subtotal",
+        "discount",
+        "total",
+        "statusStep",
+        "trackingCode",
+        "items",
+        "createdAtLabel",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Coupon": {
+      "title": "Coupon",
+      "description": "Promotional discount coupon usable at checkout.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "type": { "type": "string", "enum": ["percent", "fixed"] },
+        "value": { "type": "number" },
+        "label": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["code", "type", "value", "label", "active", "createdAt", "updatedAt"]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "Verified customer product review subject to admin pre-publication moderation (no PII stored).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "number" },
+        "productId": { "type": "number" },
+        "product": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "author": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "city": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "rating": { "type": "number" },
+        "date": { "type": "string", "maxLength": 40 },
+        "comment": { "type": "string", "minLength": 2, "maxLength": 1000 },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"], "description": "Moderation status before public display" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "productId", "product", "author", "city", "rating", "date", "comment", "userId", "status", "createdAt", "updatedAt"]
+    },
+    "Question": {
+      "title": "Question",
+      "description": "Public customer Q&A entry on product detail pages (no PII).",
+      "type": "object",
+      "properties": {
+        "productId": { "type": "number" },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "question": { "type": "string", "minLength": 3, "maxLength": 600 },
+        "answer": { "type": "string", "maxLength": 1200 },
+        "date": { "type": "string", "maxLength": 60 },
+        "answered": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "productId",
+        "productName",
+        "userId",
+        "authorName",
+        "question",
+        "answer",
+        "date",
+        "answered",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "NewsletterSubscriber": {
+      "title": "NewsletterSubscriber",
+      "description": "Signed-in customer email subscription for promotions (PII admin-restricted read).",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "email", "createdAt"]
+    },
+    "StoreSettings": {
+      "title": "StoreSettings",
+      "description": "Public store identity, CNPJ, contact details, shipping rates, and PIX discount configuration.",
+      "type": "object",
+      "properties": {
+        "storeName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "cnpj": { "type": "string", "minLength": 5, "maxLength": 40 },
+        "address": { "type": "string", "minLength": 3, "maxLength": 200 },
+        "phone": { "type": "string", "minLength": 5, "maxLength": 30 },
+        "whatsappDigits": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "expressShippingPrice": { "type": "number" },
+        "standardShippingPrice": { "type": "number" },
+        "pixDiscountPercent": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "storeName",
+        "cnpj",
+        "address",
+        "phone",
+        "whatsappDigits",
+        "email",
+        "expressShippingPrice",
+        "standardShippingPrice",
+        "pixDiscountPercent",
+        "updatedAt"
+      ]
+    },
+    "TrackingRecord": {
+      "title": "TrackingRecord",
+      "description": "Admin-issued shipment tracking record with live route progress looked up publicly only by exact code (zero unmasked PII).",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "minLength": 3, "maxLength": 60, "pattern": "^[A-Z0-9_\\-]+$" },
+        "orderCode": { "type": "string", "maxLength": 40 },
+        "customerLabel": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "maskedCpf": { "type": "string", "maxLength": 30 },
+        "productSummary": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "cityState": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "originCityState": { "type": "string", "maxLength": 120 },
+        "destinationCityState": { "type": "string", "maxLength": 120 },
+        "currentLocation": { "type": "string", "maxLength": 160 },
+        "routeProgress": { "type": "number" },
+        "invoiceNumber": { "type": "string", "maxLength": 40 },
+        "orderTotal": { "type": "number" },
+        "weightKg": { "type": "number" },
+        "shippingLabel": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "statusStep": { "type": "number" },
+        "statusNote": { "type": "string", "maxLength": 300 },
+        "active": { "type": "boolean" },
+        "createdAtLabel": { "type": "string", "maxLength": 60 },
+        "updatedAtLabel": { "type": "string", "maxLength": 60 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "code",
+        "orderCode",
+        "customerLabel",
+        "productSummary",
+        "cityState",
+        "shippingLabel",
+        "statusStep",
+        "statusNote",
+        "active",
+        "createdAtLabel",
+        "updatedAtLabel",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "TrackingPrivateDetails": {
+      "title": "TrackingPrivateDetails",
+      "description": "Admin-isolated recipient PII (unmasked CPF, phone, street address, CEP) used for NF-e, shipping labels, and WhatsApp dispatch.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "minLength": 3, "maxLength": 60 },
+        "customerCpf": { "type": "string", "maxLength": 30 },
+        "customerPhone": { "type": "string", "maxLength": 30 },
+        "customerAddress": { "type": "string", "maxLength": 300 },
+        "customerCep": { "type": "string", "maxLength": 20 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["code", "customerCpf", "customerPhone", "customerAddress", "customerCep", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Public product catalog readable by all shoppers, writable only by verified admins."
+    },
+    "/productCosts/{productId}": {
+      "schema": { "$ref": "#/entities/ProductCost" },
+      "description": "Wholesale cost records restricted strictly to administrators."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Customer profile and delivery preferences, readable and writable only by owner or admin."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Administrator registry managed by the bootstrapped admin."
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Marketplace orders isolated to the purchasing user or admin."
+    },
+    "/coupons/{couponId}": {
+      "schema": { "$ref": "#/entities/Coupon" },
+      "description": "Promotional checkout discount coupons."
+    },
+    "/reviews/{reviewId}": {
+      "schema": { "$ref": "#/entities/Review" },
+      "description": "Public product reviews without PII."
+    },
+    "/questions/{questionId}": {
+      "schema": { "$ref": "#/entities/Question" },
+      "description": "Product Q&A entries; questions created by verified users, answers updated by admin."
+    },
+    "/newsletter/{subscriberId}": {
+      "schema": { "$ref": "#/entities/NewsletterSubscriber" },
+      "description": "Newsletter subscriber emails restricted to owner/admin."
+    },
+    "/storeSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/StoreSettings" },
+      "description": "Store public identity, CNPJ, contact info, and shipping rates managed by admins."
+    },
+    "/trackings/{trackingId}": {
+      "schema": { "$ref": "#/entities/TrackingRecord" },
+      "description": "Exact-code public tracking records created and managed exclusively by admins."
+    },
+    "/trackings/{trackingId}/private/{detailId}": {
+      "schema": { "$ref": "#/entities/TrackingPrivateDetails" },
+      "description": "Recipient PII isolated strictly to verified administrators."
+    }
+  }
+}

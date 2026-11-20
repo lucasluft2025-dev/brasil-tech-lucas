@@ -1,0 +1,8 @@
+{
+  "name": "Brasil Tech — Consoles, Celulares e Acessórios",
+  "description": "Brasil Tech: consoles PlayStation e Xbox, celulares iPhone e acessórios revisados em bancada técnica, com 6 meses de garantia e envio com rastreio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
