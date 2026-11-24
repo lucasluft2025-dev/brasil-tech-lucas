@@ -39,7 +39,7 @@ export function ProductCard({
   return (
     <article className="group flex flex-col bg-white border border-slate-200 rounded-xl overflow-hidden transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-300 hover:shadow-md min-w-0">
       <div
-        className="relative aspect-square bg-slate-50 border-b border-slate-100 flex items-center justify-center p-4 sm:p-5 overflow-hidden cursor-pointer"
+        className="relative aspect-[4/3] sm:aspect-square bg-slate-50 border-b border-slate-100 flex items-center justify-center p-3 sm:p-5 overflow-hidden cursor-pointer"
         onClick={() => onOpenProduct(product.id)}
       >
         {!imageFailed && product.image ? (
@@ -64,7 +64,7 @@ export function ProductCard({
         )}
 
         {hasDiscount && (
-          <span className="absolute left-2.5 top-2.5 bg-blue-600 text-white text-[10px] font-bold px-2 py-0.5 rounded tracking-wide tabular-nums">
+          <span className="absolute left-2 top-2 bg-blue-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded tracking-wide tabular-nums">
             -{discount}%
           </span>
         )}
@@ -76,71 +76,77 @@ export function ProductCard({
             e.stopPropagation();
             onToggleFav(product.id);
           }}
-          className={`absolute right-2.5 top-2.5 w-9 h-9 rounded-full border flex items-center justify-center transition-colors ${
+          className={`absolute right-2 top-2 w-8 h-8 sm:w-9 sm:h-9 rounded-full border flex items-center justify-center transition-colors ${
             isFavorite
               ? 'bg-rose-50 border-rose-200 text-rose-600'
               : 'bg-white/95 border-slate-200 text-slate-500 hover:text-slate-900'
           }`}
         >
-          <Heart size={15} fill={isFavorite ? 'currentColor' : 'none'} strokeWidth={2.2} />
+          <Heart size={14} fill={isFavorite ? 'currentColor' : 'none'} strokeWidth={2.2} />
         </button>
       </div>
 
-      <div className="p-3.5 sm:p-4 flex flex-col flex-1 min-w-0">
-        <div className="flex items-center gap-1.5 text-[11px] font-medium text-slate-500 truncate mb-1">
-          <span>{meta.subCategory}</span>
+      <div className="p-2.5 sm:p-4 flex flex-col flex-1 min-w-0">
+        <div className="flex items-center gap-1 text-[10.5px] sm:text-[11px] font-medium text-slate-500 truncate mb-1">
+          <span className="truncate">{meta.subCategory}</span>
           <span aria-hidden="true">·</span>
           <span className="truncate">{product.condition}</span>
         </div>
 
         <h3
-          className="text-[13.5px] sm:text-sm font-semibold text-slate-900 leading-snug line-clamp-2 min-h-[2.4rem] cursor-pointer hover:text-blue-600 transition-colors mb-1.5"
+          className="text-[12.5px] sm:text-sm font-semibold text-slate-900 leading-snug line-clamp-2 min-h-[2.2rem] sm:min-h-[2.45rem] cursor-pointer hover:text-blue-600 transition-colors mb-1"
           onClick={() => onOpenProduct(product.id)}
         >
           {product.name}
         </h3>
 
-        <div className="flex items-center gap-1.5 text-[11px] text-slate-600 mb-2.5">
-          <span className="text-amber-500 font-semibold">★ {product.rating}</span>
-          <span className="text-slate-400 tabular-nums">({totalReviews})</span>
+        <div className="flex items-center gap-1 text-[10.5px] sm:text-[11px] text-slate-600 mb-2 min-w-0">
+          <span className="text-amber-500 font-semibold shrink-0">★ {product.rating}</span>
+          <span className="text-slate-400 tabular-nums shrink-0">({totalReviews})</span>
           {meta.division === 'mobile' && meta.batteryHealth !== 'N/A' && (
             <>
-              <span aria-hidden="true" className="text-slate-300">
+              <span aria-hidden="true" className="text-slate-300 hidden sm:inline">
                 ·
               </span>
-              <span className="text-slate-500 truncate">Bateria {meta.batteryHealth}</span>
+              <span className="text-slate-500 truncate hidden sm:inline">
+                Bateria {meta.batteryHealth}
+              </span>
             </>
           )}
         </div>
 
-        <div className="mt-auto pt-2 border-t border-slate-100">
+        <div className="mt-auto pt-2 border-t border-slate-100 min-w-0">
           {hasDiscount && (
-            <div className="text-[11px] text-slate-400 line-through tabular-nums">
+            <div className="text-[10.5px] sm:text-[11px] text-slate-400 line-through tabular-nums">
               {money(product.old)}
             </div>
           )}
-          <div className="text-lg sm:text-xl font-bold text-slate-950 tracking-tight tabular-nums">
+          <div className="text-base sm:text-xl font-bold text-slate-950 tracking-tight tabular-nums truncate">
             {money(product.price)}
           </div>
-          <div className="text-[11px] text-slate-500 tabular-nums mt-0.5">
-            À vista no PIX ou {formatInstallmentText(product.price, meta.installmentsMax || installmentsMax)}
+          <div className="text-[10.5px] sm:text-[11px] text-slate-500 tabular-nums mt-0.5 line-clamp-1">
+            PIX ou {formatInstallmentText(product.price, meta.installmentsMax || installmentsMax)}
           </div>
 
-          <div className="flex items-center justify-between text-[11px] mt-2 mb-3">
-            <span className={isOutOfStock ? 'text-rose-600 font-semibold' : 'text-emerald-700 font-medium'}>
-              {isOutOfStock ? 'Sob consulta' : `Em estoque (${product.stock} un.)`}
+          <div className="flex items-center justify-between text-[10.5px] sm:text-[11px] mt-1.5 mb-2.5 gap-1">
+            <span
+              className={`truncate ${
+                isOutOfStock ? 'text-rose-600 font-semibold' : 'text-emerald-700 font-medium'
+              }`}
+            >
+              {isOutOfStock ? 'Sob consulta' : `Em estoque (${product.stock})`}
             </span>
-            <span className="text-slate-400 hidden sm:inline">{product.warranty.split(' ')[0]} {product.warranty.split(' ')[1]}</span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
             <button
               type="button"
               disabled={isOutOfStock}
               onClick={() => onBuyNow(product.id)}
-              className="flex-1 min-h-[40px] px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-500 text-white text-xs font-semibold transition-colors whitespace-nowrap truncate"
+              className="flex-1 min-w-0 min-h-[38px] sm:min-h-[40px] px-2 sm:px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-500 text-white text-[11.5px] sm:text-xs font-semibold transition-colors whitespace-nowrap truncate"
             >
-              Comprar agora
+              <span className="sm:hidden">Comprar</span>
+              <span className="hidden sm:inline">Comprar agora</span>
             </button>
             <button
               type="button"
@@ -148,9 +154,9 @@ export function ProductCard({
               aria-label="Adicionar ao carrinho"
               title="Adicionar ao carrinho"
               onClick={() => onAddCart(product.id)}
-              className="min-h-[40px] w-10 shrink-0 rounded-lg border border-slate-200 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 hover:text-blue-700 text-slate-700 flex items-center justify-center transition-colors"
+              className="min-h-[38px] sm:min-h-[40px] w-9 sm:w-10 shrink-0 rounded-lg border border-slate-200 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 hover:text-blue-700 text-slate-700 flex items-center justify-center transition-colors"
             >
-              <ShoppingBag size={16} />
+              <ShoppingBag size={15} />
             </button>
           </div>
         </div>
