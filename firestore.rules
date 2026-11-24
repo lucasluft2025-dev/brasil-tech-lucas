@@ -220,7 +220,8 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'storeName', 'cnpj', 'address', 'phone', 'whatsappDigits', 'email',
-          'expressShippingPrice', 'standardShippingPrice', 'pixDiscountPercent', 'updatedAt'
+          'expressShippingPrice', 'standardShippingPrice', 'pixDiscountPercent',
+          'metaPixelId', 'installmentsMax', 'updatedAt'
         ])
         && data.storeName is string && data.storeName.size() >= 1 && data.storeName.size() <= 100
         && data.cnpj is string && data.cnpj.size() >= 5 && data.cnpj.size() <= 40
@@ -231,6 +232,44 @@ service cloud.firestore {
         && data.expressShippingPrice is number && data.expressShippingPrice >= 0 && data.expressShippingPrice <= 5000
         && data.standardShippingPrice is number && data.standardShippingPrice >= 0 && data.standardShippingPrice <= 5000
         && data.pixDiscountPercent is number && data.pixDiscountPercent >= 0 && data.pixDiscountPercent <= 50
+        && (!('metaPixelId' in data) || (data.metaPixelId is string && data.metaPixelId.size() <= 40))
+        && (!('installmentsMax' in data) || (data.installmentsMax is number && data.installmentsMax >= 1 && data.installmentsMax <= 24))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBanner(data) {
+      return data.keys().hasAll(['id', 'slot', 'title', 'targetDivision', 'order', 'active', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'slot', 'badge', 'title', 'subtitle', 'ctaLabel',
+          'targetDivision', 'targetCategory', 'image', 'order', 'active', 'updatedAt'
+        ])
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 60
+        && data.slot in ['hero', 'secondary']
+        && (!('badge' in data) || (data.badge is string && data.badge.size() <= 80))
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 160
+        && (!('subtitle' in data) || (data.subtitle is string && data.subtitle.size() <= 320))
+        && (!('ctaLabel' in data) || (data.ctaLabel is string && data.ctaLabel.size() <= 60))
+        && data.targetDivision is string && data.targetDivision.size() <= 60
+        && (!('targetCategory' in data) || (data.targetCategory is string && data.targetCategory.size() <= 60))
+        && (!('image' in data) || (data.image is string && data.image.size() <= 500))
+        && data.order is number && data.order >= 0 && data.order <= 1000
+        && data.active is bool
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCategory(data) {
+      return data.keys().hasAll(['id', 'name', 'slug', 'division', 'order', 'active', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'name', 'slug', 'division', 'description', 'image', 'order', 'active', 'updatedAt'
+        ])
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 60
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && data.slug is string && data.slug.size() >= 1 && data.slug.size() <= 80
+        && data.division in ['mobile', 'gamer', 'all']
+        && (!('description' in data) || (data.description is string && data.description.size() <= 200))
+        && (!('image' in data) || (data.image is string && data.image.size() <= 500))
+        && data.order is number && data.order >= 0 && data.order <= 1000
+        && data.active is bool
         && data.updatedAt is timestamp;
     }
 
@@ -528,6 +567,28 @@ service cloud.firestore {
           && existsAfter(/databases/$(database)/documents/trackings/$(trackingId));
         allow delete: if isAdmin() && isValidId(trackingId) && isValidId(detailId);
       }
+    }
+
+    // 12. Promotional Banners (Public Read, Admin Write)
+    match /banners/{bannerId} {
+      allow get: if isValidId(bannerId) && (resource == null || resource.data.active == true || isAdmin());
+      allow list: if resource.data.active == true || isBootstrappedAdmin();
+      allow create, update: if isAdmin()
+        && isValidId(bannerId)
+        && isValidBanner(incoming())
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(bannerId);
+    }
+
+    // 13. Dynamic Store Categories (Public Read, Admin Write)
+    match /categories/{categoryId} {
+      allow get: if isValidId(categoryId) && (resource == null || resource.data.active == true || isAdmin());
+      allow list: if resource.data.active == true || isBootstrappedAdmin();
+      allow create, update: if isAdmin()
+        && isValidId(categoryId)
+        && isValidCategory(incoming())
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(categoryId);
     }
   }
 }

@@ -219,6 +219,7 @@ export function PublicOrdersShowcase({
             <img
               src={selectedOrder.productImage}
               alt={selectedOrder.productName}
+              decoding="async"
               referrerPolicy="no-referrer"
             />
             <div className="showcase-detail-product-info">
@@ -474,7 +475,7 @@ export function PublicOrdersShowcase({
                   onClick={() => {
                     setSelectedCode(ord.code);
                     window.location.hash = `#/entregas/${encodeURIComponent(ord.code)}`;
-                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                    window.scrollTo(0, 0);
                   }}
                 >
                   <div className="showcase-order-top">
@@ -486,6 +487,8 @@ export function PublicOrdersShowcase({
                     <img
                       src={ord.productImage}
                       alt={ord.productName}
+                      loading="lazy"
+                      decoding="async"
                       referrerPolicy="no-referrer"
                     />
                     <div className="showcase-order-info">

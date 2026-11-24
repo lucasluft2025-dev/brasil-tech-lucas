@@ -1,7 +1,17 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { CATEGORIES, CHECKOUT_URL_SPEC_KEY, MarketplaceProduct, money } from '../data/marketplaceCatalog';
+import {
+  CATEGORIES,
+  CHECKOUT_URL_SPEC_KEY,
+  MarketplaceProduct,
+  PRODUCT_META_SPEC_KEY,
+  StoreBanner,
+  StoreCategory,
+  deriveProductMeta,
+  money,
+} from '../data/marketplaceCatalog';
 import {
   CostMap,
+  DEFAULT_STOREFRONT_CONTENT,
   PersistedAdmin,
   PersistedCoupon,
   PersistedNewsletter,
@@ -12,6 +22,7 @@ import {
   PersistedUser,
   ReviewStatus,
   StoreSettings,
+  StorefrontContentState,
   addAdminUser,
   adjustProductStockAdmin,
   answerQuestionAdmin,
@@ -34,7 +45,7 @@ import {
   saveCouponAdmin,
   saveProductAdmin,
   saveStoreSettingsAdmin,
-  seedInitialCatalogIfEmpty,
+  saveStorefrontContentAdmin,
   subscribeAdminsAdmin,
   subscribeNewsletterAdmin,
   subscribeTrackingsAdmin,
@@ -48,6 +59,7 @@ import { TrackingDocumentsModal } from './TrackingDocumentsModal';
 type AdminTab =
   | 'overview'
   | 'products'
+  | 'storefront'
   | 'orders'
   | 'trackings'
   | 'customers'
@@ -56,17 +68,15 @@ type AdminTab =
 
 interface AdminDashboardProps {
   products: MarketplaceProduct[];
-  hasFirestoreProducts: boolean;
   costMap: CostMap;
   orders: PersistedOrder[];
   coupons: PersistedCoupon[];
   questions: PersistedQuestion[];
   reviews: PersistedReview[];
   storeSettings: StoreSettings;
+  storefrontContent?: StorefrontContentState;
   adminEmail: string;
   isBootstrappedAdmin: boolean;
-  firebaseAuthNotice?: string | null;
-  onResendVerificationEmail?: () => Promise<void>;
   onAdminLogout?: () => void;
   onBackToStore: () => void;
   onOpenOrdersShowcase?: () => void;
@@ -83,17 +93,15 @@ const STATUS_LABELS = [
 
 export function AdminDashboard({
   products,
-  hasFirestoreProducts,
   costMap,
   orders,
   coupons,
   questions,
   reviews,
   storeSettings,
+  storefrontContent = DEFAULT_STOREFRONT_CONTENT,
   adminEmail,
   isBootstrappedAdmin,
-  firebaseAuthNotice,
-  onResendVerificationEmail,
   onAdminLogout,
   onBackToStore,
   onOpenOrdersShowcase,
@@ -163,6 +171,22 @@ export function AdminDashboard({
   const [pDesc, setPDesc] = useState('');
   const [pSpecsText, setPSpecsText] = useState('');
   const [pCheckoutUrl, setPCheckoutUrl] = useState('');
+  const [pBrand, setPBrand] = useState('');
+  const [pDivision, setPDivision] = useState<'mobile' | 'gamer'>('gamer');
+  const [pSubCategory, setPSubCategory] = useState('');
+  const [pStorage, setPStorage] = useState('');
+  const [pColor, setPColor] = useState('');
+  const [pBatteryHealth, setPBatteryHealth] = useState('');
+  const [pAccessoriesIncluded, setPAccessoriesIncluded] = useState('');
+  const [pGamesCount, setPGamesCount] = useState('0');
+  const [pInstallmentsMax, setPInstallmentsMax] = useState('12');
+  const [pIsNewArrival, setPIsNewArrival] = useState(false);
+
+  // Editable Banners, Categories & Pixel draft
+  const [contentDraft, setContentDraft] = useState<StorefrontContentState>(storefrontContent);
+  useEffect(() => {
+    setContentDraft(storefrontContent);
+  }, [storefrontContent]);
 
   // Order edits draft map & receipt preview
   const [orderDrafts, setOrderDrafts] = useState<
@@ -275,6 +299,13 @@ export function AdminDashboard({
       return { cat, count: catProds.length, stockUnits, soldUnits, stockValue };
     });
 
+    const mobileProducts = products.filter((p) => deriveProductMeta(p).division === 'mobile');
+    const gamerProducts = products.filter((p) => deriveProductMeta(p).division === 'gamer');
+    const mobileStockValue = mobileProducts.reduce((s, p) => s + p.price * p.stock, 0);
+    const gamerStockValue = gamerProducts.reduce((s, p) => s + p.price * p.stock, 0);
+    const mobileSoldUnits = mobileProducts.reduce((s, p) => s + p.sold, 0);
+    const gamerSoldUnits = gamerProducts.reduce((s, p) => s + p.sold, 0);
+
     const maxStockValue = Math.max(1, ...categoryStats.map((c) => c.stockValue));
 
     const orderPipeline = STATUS_LABELS.map((label, step) => ({
@@ -299,6 +330,12 @@ export function AdminDashboard({
       maxStockValue,
       orderPipeline,
       validOrdersCount: validOrders.length,
+      mobileProductsCount: mobileProducts.length,
+      gamerProductsCount: gamerProducts.length,
+      mobileStockValue,
+      gamerStockValue,
+      mobileSoldUnits,
+      gamerSoldUnits,
     };
   }, [orders, products, costMap, questions, reviews]);
 
@@ -382,10 +419,21 @@ export function AdminDashboard({
     setPCheckoutUrl(base.checkoutUrl || '');
     setPSpecsText(
       base.specs
-        .filter((s) => s.label !== CHECKOUT_URL_SPEC_KEY)
+        .filter((s) => s.label !== CHECKOUT_URL_SPEC_KEY && s.label !== PRODUCT_META_SPEC_KEY)
         .map((s) => `${s.label}: ${s.value}`)
         .join('\n')
     );
+    const derived = deriveProductMeta(base);
+    setPBrand(base.brand || derived.brand);
+    setPDivision(base.division || derived.division);
+    setPSubCategory(base.subCategory || derived.subCategory);
+    setPStorage(base.storage || derived.storage);
+    setPColor(base.color || derived.color);
+    setPBatteryHealth(base.batteryHealth || (derived.division === 'mobile' ? derived.batteryHealth : ''));
+    setPAccessoriesIncluded(base.accessoriesIncluded || derived.accessoriesIncluded);
+    setPGamesCount(String(base.gamesCount || 0));
+    setPInstallmentsMax(String(base.installmentsMax || 12));
+    setPIsNewArrival(Boolean(base.isNewArrival));
   };
 
   const openEditProductModal = (p: MarketplaceProduct) => {
@@ -408,10 +456,21 @@ export function AdminDashboard({
     setPCheckoutUrl(p.checkoutUrl || '');
     setPSpecsText(
       p.specs
-        .filter((s) => s.label !== CHECKOUT_URL_SPEC_KEY)
+        .filter((s) => s.label !== CHECKOUT_URL_SPEC_KEY && s.label !== PRODUCT_META_SPEC_KEY)
         .map((s) => `${s.label}: ${s.value}`)
         .join('\n')
     );
+    const derived = deriveProductMeta(p);
+    setPBrand(p.brand || derived.brand);
+    setPDivision(p.division || derived.division);
+    setPSubCategory(p.subCategory || derived.subCategory);
+    setPStorage(p.storage || derived.storage);
+    setPColor(p.color || derived.color);
+    setPBatteryHealth(p.batteryHealth || (derived.division === 'mobile' ? derived.batteryHealth : ''));
+    setPAccessoriesIncluded(p.accessoriesIncluded || derived.accessoriesIncluded);
+    setPGamesCount(String(p.gamesCount || derived.gamesCount || 0));
+    setPInstallmentsMax(String(p.installmentsMax || derived.installmentsMax || 12));
+    setPIsNewArrival(Boolean(p.isNewArrival));
   };
 
   const handleSaveProduct = async (e: FormEvent) => {
@@ -439,7 +498,7 @@ export function AdminDashboard({
         }
         return { label: 'Detalhe', value: line };
       })
-      .filter((s) => s.label !== CHECKOUT_URL_SPEC_KEY);
+      .filter((s) => s.label !== CHECKOUT_URL_SPEC_KEY && s.label !== PRODUCT_META_SPEC_KEY);
 
     const payload: MarketplaceProduct = {
       ...editingProduct,
@@ -457,6 +516,16 @@ export function AdminDashboard({
       warranty: pWarranty.trim() || '6 meses com a Brasil Tech',
       condition: pCondition.trim() || 'Seminovo revisado',
       checkoutUrl: pCheckoutUrl.trim(),
+      brand: pBrand.trim() || undefined,
+      division: pDivision,
+      subCategory: pSubCategory.trim() || undefined,
+      storage: pStorage.trim() || undefined,
+      color: pColor.trim() || undefined,
+      batteryHealth: pBatteryHealth.trim() || undefined,
+      accessoriesIncluded: pAccessoriesIncluded.trim() || undefined,
+      gamesCount: Math.max(0, Number(pGamesCount) || 0) || undefined,
+      installmentsMax: Math.min(24, Math.max(1, Number(pInstallmentsMax) || 12)),
+      isNewArrival: pIsNewArrival,
       specs: parsedSpecs,
     };
 
@@ -464,25 +533,15 @@ export function AdminDashboard({
 
     setBusy(true);
     try {
-      await saveProductAdmin(payload, costVal, isNewProduct || !hasFirestoreProducts);
+      await saveProductAdmin(payload, costVal, isNewProduct);
       onNotify(
-        isNewProduct ? `Produto "${payload.name}" cadastrado!` : `Produto "${payload.name}" atualizado!`
+        isNewProduct
+          ? `Produto "${payload.name}" cadastrado e publicado no site!`
+          : `Produto "${payload.name}" atualizado e publicado no site!`
       );
       setEditingProduct(null);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleSeedCatalog = async () => {
-    setBusy(true);
-    try {
-      const seeded = await seedInitialCatalogIfEmpty();
-      onNotify(
-        seeded > 0
-          ? `${seeded} produto(s) sincronizados com o Firestore!`
-          : 'Catálogo já está sincronizado no banco de dados.'
-      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Erro ao salvar produto.');
     } finally {
       setBusy(false);
     }
@@ -596,7 +655,9 @@ export function AdminDashboard({
       );
       setCCode('');
       setCLabel('');
-      onNotify(`Cupom ${clean} salvo!`);
+      onNotify(`Cupom ${clean} salvo e publicado no site!`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Erro ao salvar cupom.');
     } finally {
       setBusy(false);
     }
@@ -611,6 +672,8 @@ export function AdminDashboard({
       setNewAdminUid('');
       setNewAdminEmail('');
       onNotify('Administrador adicionado com sucesso!');
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Erro ao adicionar administrador.');
     } finally {
       setBusy(false);
     }
@@ -621,7 +684,9 @@ export function AdminDashboard({
     setBusy(true);
     try {
       await saveStoreSettingsAdmin(settingsDraft);
-      onNotify('Configurações da loja atualizadas no Firestore!');
+      onNotify('Configurações da loja atualizadas e publicadas no site!');
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Erro ao salvar configurações.');
     } finally {
       setBusy(false);
     }
@@ -762,11 +827,16 @@ export function AdminDashboard({
         }).catch(() => undefined);
       }
 
+      setTrackingRulesWarning(false);
       setLastSavedTrackingForActions(saved);
-      onNotify(`Rastreio ${cleanCode} salvo! Agora envie no WhatsApp ou gere NF-e e Etiqueta.`);
-    } catch {
-      setTrackingRulesWarning(true);
-      onNotify('Rastreio salvo localmente. Publique firestore.rules para sincronização global.');
+      onNotify(
+        saved.active
+          ? `Rastreio ${cleanCode} salvo e liberado ao vivo para o cliente!`
+          : `Rastreio ${cleanCode} salvo como oculto (clientes não visualizam enquanto estiver desmarcado).`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro ao salvar rastreio no servidor.';
+      onNotify(msg);
     } finally {
       setBusy(false);
     }
@@ -797,16 +867,11 @@ export function AdminDashboard({
             <div className="admin-kicker">🛡️ Painel Administrativo • {storeSettings.storeName}</div>
             <h1>Gestão 100% Completa do Marketplace</h1>
             <p>
-              Admin: <b>{adminEmail}</b> • CNPJ: {storeSettings.cnpj} • Banco Firestore em tempo real
+              Admin: <b>{adminEmail}</b> • CNPJ: {storeSettings.cnpj} • Publicação automática ao vivo no site
             </p>
           </div>
         </div>
         <div className="admin-top-actions">
-          {!hasFirestoreProducts && (
-            <button type="button" className="btn-yellow" disabled={busy} onClick={handleSeedCatalog}>
-              ⚡ Sincronizar 26 produtos no Banco
-            </button>
-          )}
           <button
             type="button"
             className="pdp-back"
@@ -842,22 +907,6 @@ export function AdminDashboard({
         </div>
       </div>
 
-      {firebaseAuthNotice && (
-        <div className="admin-rules-warning" style={{ marginBottom: 14 }}>
-          <strong>🔐 Modo Sessão Administrativa ({adminEmail})</strong>
-          <p style={{ margin: '4px 0 8px' }}>{firebaseAuthNotice}</p>
-          {onResendVerificationEmail && (
-            <button
-              type="button"
-              className="admin-mini-btn"
-              onClick={onResendVerificationEmail}
-            >
-              ✉️ Reenviar e-mail de verificação Firebase
-            </button>
-          )}
-        </div>
-      )}
-
       <div className="admin-tabs">
         <button
           type="button"
@@ -872,6 +921,13 @@ export function AdminDashboard({
           onClick={() => setTab('products')}
         >
           📦 Produtos & Estoque ({products.length})
+        </button>
+        <button
+          type="button"
+          className={tab === 'storefront' ? 'active' : ''}
+          onClick={() => setTab('storefront')}
+        >
+          🖼️ Banners, Categorias & Pixel
         </button>
         <button
           type="button"
@@ -912,6 +968,22 @@ export function AdminDashboard({
 
       {tab === 'overview' && (
         <div className="admin-panel">
+          <div className="admin-kpi-grid">
+            <div className="admin-kpi">
+              <small>Brasil Tech Mobile</small>
+              <strong>{money(financials.mobileStockValue)}</strong>
+              <span>
+                {financials.mobileProductsCount} aparelhos • {financials.mobileSoldUnits} vendidos
+              </span>
+            </div>
+            <div className="admin-kpi">
+              <small>Brasil Tech Gamer</small>
+              <strong>{money(financials.gamerStockValue)}</strong>
+              <span>
+                {financials.gamerProductsCount} consoles/jogos • {financials.gamerSoldUnits} vendidos
+              </span>
+            </div>
+          </div>
           <div className="admin-kpi-grid">
             <div className="admin-kpi">
               <small>Faturamento Bruto</small>
@@ -1089,18 +1161,21 @@ export function AdminDashboard({
                         <button
                           type="button"
                           className={`admin-mini-btn ${p.featured ? 'active-pill' : ''}`}
-                          disabled={!hasFirestoreProducts}
                           onClick={async () => {
-                            await saveProductAdmin(
-                              { ...p, featured: !p.featured },
-                              unitCost,
-                              false
-                            );
-                            onNotify(
-                              !p.featured
-                                ? `${p.name} adicionado às Ofertas!`
-                                : `${p.name} removido das Ofertas.`
-                            );
+                            try {
+                              await saveProductAdmin(
+                                { ...p, featured: !p.featured },
+                                unitCost,
+                                false
+                              );
+                              onNotify(
+                                !p.featured
+                                  ? `${p.name} adicionado às Ofertas no site!`
+                                  : `${p.name} removido das Ofertas.`
+                              );
+                            } catch (err) {
+                              onNotify(err instanceof Error ? err.message : 'Erro ao atualizar destaque.');
+                            }
                           }}
                         >
                           {p.featured ? '⚡ Sim' : 'Não'}
@@ -1110,10 +1185,14 @@ export function AdminDashboard({
                         <div className="admin-stock-ctrl">
                           <button
                             type="button"
-                            disabled={!hasFirestoreProducts || p.stock <= 0}
+                            disabled={p.stock <= 0}
                             onClick={async () => {
-                              await adjustProductStockAdmin(p.id, p.stock - 1);
-                              onNotify(`Estoque de ${p.name}: ${p.stock - 1} un.`);
+                              try {
+                                await adjustProductStockAdmin(p.id, p.stock - 1, p);
+                                onNotify(`Estoque de ${p.name}: ${p.stock - 1} un.`);
+                              } catch (err) {
+                                onNotify(err instanceof Error ? err.message : 'Erro ao atualizar estoque.');
+                              }
                             }}
                           >
                             −
@@ -1121,10 +1200,13 @@ export function AdminDashboard({
                           <span className={p.stock <= 5 ? 'low' : ''}>{p.stock}</span>
                           <button
                             type="button"
-                            disabled={!hasFirestoreProducts}
                             onClick={async () => {
-                              await adjustProductStockAdmin(p.id, p.stock + 1);
-                              onNotify(`Estoque de ${p.name}: ${p.stock + 1} un.`);
+                              try {
+                                await adjustProductStockAdmin(p.id, p.stock + 1, p);
+                                onNotify(`Estoque de ${p.name}: ${p.stock + 1} un.`);
+                              } catch (err) {
+                                onNotify(err instanceof Error ? err.message : 'Erro ao atualizar estoque.');
+                              }
                             }}
                           >
                             +
@@ -1151,11 +1233,14 @@ export function AdminDashboard({
                             <button
                               type="button"
                               className="admin-mini-btn danger"
-                              disabled={!hasFirestoreProducts}
                               onClick={async () => {
-                                await deleteProductAdmin(p.id);
-                                setConfirmDeleteId(null);
-                                onNotify(`Produto "${p.name}" excluído.`);
+                                try {
+                                  await deleteProductAdmin(p.id);
+                                  setConfirmDeleteId(null);
+                                  onNotify(`Produto "${p.name}" excluído do site.`);
+                                } catch (err) {
+                                  onNotify(err instanceof Error ? err.message : 'Erro ao excluir produto.');
+                                }
                               }}
                             >
                               Confirmar?
@@ -1164,7 +1249,6 @@ export function AdminDashboard({
                             <button
                               type="button"
                               className="admin-mini-btn danger"
-                              disabled={!hasFirestoreProducts}
                               onClick={() => setConfirmDeleteId(delKey)}
                             >
                               Excluir
@@ -1177,6 +1261,336 @@ export function AdminDashboard({
                 })}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {tab === 'storefront' && (
+        <div className="admin-panel" style={{ display: 'grid', gap: 16 }}>
+          <div className="checkout-card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <div>
+                <h2 style={{ margin: 0 }}>Meta Pixel &amp; Parcelamento Padrão</h2>
+                <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--muted)' }}>
+                  Disparo deduplicado automático de ViewContent, AddToCart, InitiateCheckout e Purchase.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="primary"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    const saved = await saveStorefrontContentAdmin(contentDraft);
+                    setContentDraft(saved);
+                    onNotify('Banners, Categorias e Meta Pixel salvos na loja!');
+                  } catch (err) {
+                    onNotify(err instanceof Error ? err.message : 'Erro ao salvar alterações.');
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                {busy ? 'Salvando...' : '💾 Salvar Vitrine & Pixel'}
+              </button>
+            </div>
+            <div className="form-grid-2">
+              <label>
+                ID do Meta Pixel (Facebook / Instagram Ads)
+                <input
+                  type="text"
+                  placeholder="Ex: 123456789012345"
+                  value={contentDraft.metaPixelId}
+                  onChange={(e) =>
+                    setContentDraft((prev) => ({
+                      ...prev,
+                      metaPixelId: e.target.value.replace(/\D/g, ''),
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                Parcelas máximas exibidas nos cards
+                <input
+                  type="number"
+                  min={1}
+                  max={24}
+                  value={contentDraft.installmentsMax}
+                  onChange={(e) =>
+                    setContentDraft((prev) => ({
+                      ...prev,
+                      installmentsMax: Number(e.target.value) || 12,
+                    }))
+                  }
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="checkout-card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+              <h2 style={{ margin: 0 }}>Banners Editáveis da Home ({contentDraft.banners.length})</h2>
+              <button
+                type="button"
+                className="admin-mini-btn"
+                onClick={() => {
+                  const newBanner: StoreBanner = {
+                    id: `banner-${Date.now()}`,
+                    slot: 'secondary',
+                    badge: 'NOVIDADE',
+                    title: 'Novo Destaque Brasil Tech',
+                    subtitle: 'Descrição da oferta ou lançamento',
+                    ctaLabel: 'Explorar',
+                    targetDivision: 'ofertas',
+                    targetCategory: 'Todos',
+                    image: '/src/assets/images/banner_android_showcase_1795528215423.jpg',
+                    order: contentDraft.banners.length + 1,
+                    active: true,
+                  };
+                  setContentDraft((prev) => ({
+                    ...prev,
+                    banners: [...prev.banners, newBanner],
+                  }));
+                }}
+              >
+                + Adicionar Banner Secundário
+              </button>
+            </div>
+
+            <div className="orders-list">
+              {contentDraft.banners.map((b, idx) => (
+                <div className="admin-tracking-card" key={b.id}>
+                  <div className="form-grid-2">
+                    <label>
+                      Título ({b.slot === 'hero' ? 'Banner Principal' : `Secundário #${idx}`})
+                      <input
+                        value={b.title}
+                        onChange={(e) =>
+                          setContentDraft((prev) => ({
+                            ...prev,
+                            banners: prev.banners.map((item) =>
+                              item.id === b.id ? { ...item, title: e.target.value } : item
+                            ),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Selo / Badge
+                      <input
+                        value={b.badge}
+                        onChange={(e) =>
+                          setContentDraft((prev) => ({
+                            ...prev,
+                            banners: prev.banners.map((item) =>
+                              item.id === b.id ? { ...item, badge: e.target.value } : item
+                            ),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label className="span-2">
+                      Subtítulo
+                      <input
+                        value={b.subtitle}
+                        onChange={(e) =>
+                          setContentDraft((prev) => ({
+                            ...prev,
+                            banners: prev.banners.map((item) =>
+                              item.id === b.id ? { ...item, subtitle: e.target.value } : item
+                            ),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      URL / Caminho da Imagem
+                      <input
+                        value={b.image}
+                        onChange={(e) =>
+                          setContentDraft((prev) => ({
+                            ...prev,
+                            banners: prev.banners.map((item) =>
+                              item.id === b.id ? { ...item, image: e.target.value } : item
+                            ),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Destino ao clicar
+                      <select
+                        value={b.targetDivision}
+                        onChange={(e) =>
+                          setContentDraft((prev) => ({
+                            ...prev,
+                            banners: prev.banners.map((item) =>
+                              item.id === b.id
+                                ? {
+                                    ...item,
+                                    targetDivision: e.target.value as StoreBanner['targetDivision'],
+                                  }
+                                : item
+                            ),
+                          }))
+                        }
+                      >
+                        <option value="all">Página Inicial / Tudo</option>
+                        <option value="iphones">Área Exclusiva iPhones</option>
+                        <option value="android">Smartphones Android</option>
+                        <option value="gamer">Área Gamer</option>
+                        <option value="ofertas">Ofertas em Destaque</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="admin-tracking-actions" style={{ marginTop: 10 }}>
+                    <label className="admin-check-row" style={{ margin: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={b.active}
+                        onChange={(e) =>
+                          setContentDraft((prev) => ({
+                            ...prev,
+                            banners: prev.banners.map((item) =>
+                              item.id === b.id ? { ...item, active: e.target.checked } : item
+                            ),
+                          }))
+                        }
+                      />
+                      Exibir na Home
+                    </label>
+                    {b.slot !== 'hero' && (
+                      <button
+                        type="button"
+                        className="admin-mini-btn danger"
+                        onClick={() =>
+                          setContentDraft((prev) => ({
+                            ...prev,
+                            banners: prev.banners.filter((item) => item.id !== b.id),
+                          }))
+                        }
+                      >
+                        Remover Banner
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="checkout-card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+              <h2 style={{ margin: 0 }}>Categorias da Loja ({contentDraft.categories.length})</h2>
+              <button
+                type="button"
+                className="admin-mini-btn"
+                onClick={() => {
+                  const newCat: StoreCategory = {
+                    id: `cat-${Date.now()}`,
+                    name: 'Nova Categoria',
+                    slug: `cat-${Date.now()}`,
+                    division: 'gamer',
+                    description: 'Descrição da categoria',
+                    image: '/src/assets/ref/cats/acessorios.png',
+                    order: contentDraft.categories.length + 1,
+                    active: true,
+                  };
+                  setContentDraft((prev) => ({
+                    ...prev,
+                    categories: [...prev.categories, newCat],
+                  }));
+                }}
+              >
+                + Nova Categoria
+              </button>
+            </div>
+            <div className="orders-list">
+              {contentDraft.categories.map((cat) => (
+                <div className="admin-tracking-card" key={cat.id}>
+                  <div className="form-grid-3">
+                    <label>
+                      Nome da Categoria
+                      <input
+                        value={cat.name}
+                        onChange={(e) =>
+                          setContentDraft((prev) => ({
+                            ...prev,
+                            categories: prev.categories.map((item) =>
+                              item.id === cat.id ? { ...item, name: e.target.value } : item
+                            ),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Frente Comercial
+                      <select
+                        value={cat.division}
+                        onChange={(e) =>
+                          setContentDraft((prev) => ({
+                            ...prev,
+                            categories: prev.categories.map((item) =>
+                              item.id === cat.id
+                                ? { ...item, division: e.target.value as StoreCategory['division'] }
+                                : item
+                            ),
+                          }))
+                        }
+                      >
+                        <option value="mobile">Brasil Tech Mobile</option>
+                        <option value="gamer">Brasil Tech Gamer</option>
+                        <option value="all">Geral</option>
+                      </select>
+                    </label>
+                    <label>
+                      Ícone / Foto URL
+                      <input
+                        value={cat.image}
+                        onChange={(e) =>
+                          setContentDraft((prev) => ({
+                            ...prev,
+                            categories: prev.categories.map((item) =>
+                              item.id === cat.id ? { ...item, image: e.target.value } : item
+                            ),
+                          }))
+                        }
+                      />
+                    </label>
+                  </div>
+                  <div className="admin-tracking-actions" style={{ marginTop: 8 }}>
+                    <label className="admin-check-row" style={{ margin: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={cat.active}
+                        onChange={(e) =>
+                          setContentDraft((prev) => ({
+                            ...prev,
+                            categories: prev.categories.map((item) =>
+                              item.id === cat.id ? { ...item, active: e.target.checked } : item
+                            ),
+                          }))
+                        }
+                      />
+                      Ativa na loja
+                    </label>
+                    <button
+                      type="button"
+                      className="admin-mini-btn danger"
+                      onClick={() =>
+                        setContentDraft((prev) => ({
+                          ...prev,
+                          categories: prev.categories.filter((item) => item.id !== cat.id),
+                        }))
+                      }
+                    >
+                      Remover
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -1348,7 +1762,9 @@ export function AdminDashboard({
                             setBusy(true);
                             try {
                               await updateOrderAdmin(order.code, draft);
-                              onNotify(`Pedido ${order.code} atualizado!`);
+                              onNotify(`Pedido ${order.code} atualizado no site!`);
+                            } catch (err) {
+                              onNotify(err instanceof Error ? err.message : 'Erro ao salvar pedido.');
                             } finally {
                               setBusy(false);
                             }
@@ -1382,6 +1798,11 @@ export function AdminDashboard({
                                 code: cleanCode,
                                 orderCode: order.code,
                                 customerLabel: order.customerName,
+                                customerCpf: order.customerCpf,
+                                customerPhone: order.customerPhone,
+                                customerAddress: order.address,
+                                customerCep: order.cep,
+                                orderTotal: order.total,
                                 productSummary:
                                   order.items
                                     .map((it) => `${it.qty}x ${it.name}`)
@@ -1395,13 +1816,14 @@ export function AdminDashboard({
                                 active: true,
                               });
                               onNotify(
-                                `Rastreio ${cleanCode} publicado para consulta exata do cliente!`
+                                `Rastreio ${cleanCode} liberado ao vivo para consulta do cliente!`
                               );
-                            } catch {
-                              setTrackingRulesWarning(true);
-                              onNotify(
-                                'Não foi possível publicar o rastreio. Verifique as regras do Firestore.'
-                              );
+                            } catch (err) {
+                              const msg =
+                                err instanceof Error
+                                  ? err.message
+                                  : 'Não foi possível publicar o rastreio no servidor.';
+                              onNotify(msg);
                             } finally {
                               setBusy(false);
                             }
@@ -1409,32 +1831,36 @@ export function AdminDashboard({
                         >
                           📍 Publicar Rastreio
                         </button>
-                        {hasFirestoreProducts && (
-                          <button
-                            type="button"
-                            className="admin-mini-btn"
-                            disabled={busy}
-                            onClick={async () => {
-                              setBusy(true);
-                              try {
-                                const count = await deductOrderStockAdmin(order.items, products);
-                                onNotify(`Estoque baixado para ${count} produto(s) do pedido ${order.code}.`);
-                              } finally {
-                                setBusy(false);
-                              }
-                            }}
-                          >
-                            Baixar Estoque
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          className="admin-mini-btn"
+                          disabled={busy}
+                          onClick={async () => {
+                            setBusy(true);
+                            try {
+                              const count = await deductOrderStockAdmin(order.items, products);
+                              onNotify(`Estoque baixado para ${count} produto(s) do pedido ${order.code}.`);
+                            } catch (err) {
+                              onNotify(err instanceof Error ? err.message : 'Erro ao baixar estoque.');
+                            } finally {
+                              setBusy(false);
+                            }
+                          }}
+                        >
+                          Baixar Estoque
+                        </button>
                         {confirmDeleteId === delKey ? (
                           <button
                             type="button"
                             className="admin-mini-btn danger"
                             onClick={async () => {
-                              await deleteOrderAdmin(order.code);
-                              setConfirmDeleteId(null);
-                              onNotify(`Pedido ${order.code} removido.`);
+                              try {
+                                await deleteOrderAdmin(order.code);
+                                setConfirmDeleteId(null);
+                                onNotify(`Pedido ${order.code} removido.`);
+                              } catch (err) {
+                                onNotify(err instanceof Error ? err.message : 'Erro ao remover pedido.');
+                              }
                             }}
                           >
                             Confirmar?
@@ -1469,10 +1895,10 @@ export function AdminDashboard({
         <div className="admin-panel" style={{ display: 'grid', gap: 14 }}>
           {trackingRulesWarning && (
             <div className="tracking-not-found-box">
-              <strong>Atenção: coleção de rastreios aguardando publicação das regras</strong>
+              <strong>Atenção: sessão administrativa não sincronizada</strong>
               <p>
-                Publique o arquivo <code>firestore.rules</code> atualizado no Console do Firebase
-                para liberar a gravação e leitura exata de códigos em <code>/trackings</code>.
+                Não foi possível carregar os rastreios do servidor. Saia e entre novamente no
+                Painel Admin para liberar a sincronização global.
               </p>
             </div>
           )}
@@ -1886,7 +2312,7 @@ export function AdminDashboard({
                                 type="button"
                                 className="admin-mini-btn"
                                 onClick={() => {
-                                  const link = `${window.location.origin}/#/rastreio/${item.code}`;
+                                  const link = `${window.location.origin}${window.location.pathname}#/rastreio/${encodeURIComponent(item.code)}`;
                                   navigator.clipboard?.writeText(link);
                                   onNotify(`Link ao vivo de ${item.code} copiado!`);
                                 }}
@@ -2089,7 +2515,17 @@ export function AdminDashboard({
                                     statusNote: draft.statusNote,
                                     active: draft.active,
                                   });
-                                  onNotify(`Caminhão & rastreio ${item.code} atualizados ao vivo!`);
+                                  onNotify(
+                                    draft.active
+                                      ? `Caminhão & rastreio ${item.code} liberados ao vivo!`
+                                      : `Rastreio ${item.code} salvo como oculto.`
+                                  );
+                                } catch (err) {
+                                  const msg =
+                                    err instanceof Error
+                                      ? err.message
+                                      : 'Erro ao atualizar rastreio no servidor.';
+                                  onNotify(msg);
                                 } finally {
                                   setBusy(false);
                                 }
@@ -2297,7 +2733,7 @@ export function AdminDashboard({
               <form className="admin-coupon-form" onSubmit={handleCreateCoupon}>
                 <input
                   type="text"
-                  placeholder="Código (ex: NATAL15)"
+                  placeholder="Código (ex: BEMVINDO50)"
                   value={cCode}
                   onChange={(e) => setCCode(e.target.value)}
                   required
@@ -2344,8 +2780,12 @@ export function AdminDashboard({
                         type="button"
                         className="admin-mini-btn"
                         onClick={async () => {
-                          await saveCouponAdmin({ ...c, active: !c.active }, false);
-                          onNotify(`Cupom ${c.code} ${!c.active ? 'ativado' : 'pausado'}.`);
+                          try {
+                            await saveCouponAdmin({ ...c, active: !c.active }, false);
+                            onNotify(`Cupom ${c.code} ${!c.active ? 'ativado' : 'pausado'} no site.`);
+                          } catch (err) {
+                            onNotify(err instanceof Error ? err.message : 'Erro ao atualizar cupom.');
+                          }
                         }}
                       >
                         {c.active ? 'Pausar' : 'Ativar'}
@@ -2354,8 +2794,12 @@ export function AdminDashboard({
                         type="button"
                         className="admin-mini-btn danger"
                         onClick={async () => {
-                          await deleteCouponAdmin(c.code);
-                          onNotify(`Cupom ${c.code} excluído.`);
+                          try {
+                            await deleteCouponAdmin(c.code);
+                            onNotify(`Cupom ${c.code} excluído.`);
+                          } catch (err) {
+                            onNotify(err instanceof Error ? err.message : 'Erro ao excluir cupom.');
+                          }
                         }}
                       >
                         Excluir
@@ -2386,8 +2830,12 @@ export function AdminDashboard({
                             type="button"
                             className="admin-mini-btn danger"
                             onClick={async () => {
-                              await deleteQuestionAdmin(q.docId);
-                              onNotify('Pergunta removida.');
+                              try {
+                                await deleteQuestionAdmin(q.docId);
+                                onNotify('Pergunta removida.');
+                              } catch (err) {
+                                onNotify(err instanceof Error ? err.message : 'Erro ao remover pergunta.');
+                              }
                             }}
                           >
                             ✕
@@ -2412,8 +2860,12 @@ export function AdminDashboard({
                           onClick={async () => {
                             const text = (answerDrafts[q.docId] ?? q.answer).trim();
                             if (!text) return;
-                            await answerQuestionAdmin(q.docId, text);
-                            onNotify('Resposta publicada na página do produto!');
+                            try {
+                              await answerQuestionAdmin(q.docId, text);
+                              onNotify('Resposta publicada na página do produto!');
+                            } catch (err) {
+                              onNotify(err instanceof Error ? err.message : 'Erro ao publicar resposta.');
+                            }
                           }}
                         >
                           Responder
@@ -2513,8 +2965,10 @@ export function AdminDashboard({
                               try {
                                 await moderateReviewAdmin(rev.docId, 'approved');
                                 onNotify('Avaliação aprovada e publicada na página do produto!');
-                              } catch {
-                                onNotify('Não foi possível aprovar agora. Verifique as regras do Firestore.');
+                              } catch (err) {
+                                onNotify(
+                                  err instanceof Error ? err.message : 'Erro ao aprovar avaliação.'
+                                );
                               } finally {
                                 setBusy(false);
                               }
@@ -2533,8 +2987,10 @@ export function AdminDashboard({
                               try {
                                 await moderateReviewAdmin(rev.docId, 'rejected');
                                 onNotify('Avaliação recusada e ocultada da loja.');
-                              } catch {
-                                onNotify('Não foi possível recusar agora. Verifique as regras do Firestore.');
+                              } catch (err) {
+                                onNotify(
+                                  err instanceof Error ? err.message : 'Erro ao recusar avaliação.'
+                                );
                               } finally {
                                 setBusy(false);
                               }
@@ -2819,7 +3275,7 @@ export function AdminDashboard({
                 </label>
               </div>
               <label>
-                Link direto de compra do produto (Mini Checkout)
+                Link direto de compra do produto (Opcional — Mini Checkout)
                 <input
                   type="text"
                   inputMode="url"
@@ -2828,10 +3284,90 @@ export function AdminDashboard({
                   onChange={(e) => setPCheckoutUrl(e.target.value)}
                 />
                 <small style={{ color: 'var(--muted)', fontSize: 11 }}>
-                  Ao clicar em &quot;Ir para a compra&quot; no mini checkout, o cliente será
-                  direcionado para este link.
+                  Se preenchido, aparece como atalho de pagamento direto além do WhatsApp/PIX.
                 </small>
               </label>
+
+              <div className="form-grid-3">
+                <label>
+                  Frente / Divisão
+                  <select
+                    value={pDivision}
+                    onChange={(e) => setPDivision(e.target.value as 'mobile' | 'gamer')}
+                  >
+                    <option value="mobile">Brasil Tech Mobile</option>
+                    <option value="gamer">Brasil Tech Gamer</option>
+                  </select>
+                </label>
+                <label>
+                  Marca
+                  <input
+                    placeholder="Ex: Apple, Samsung, Sony"
+                    value={pBrand}
+                    onChange={(e) => setPBrand(e.target.value)}
+                  />
+                </label>
+                <label>
+                  Subcategoria (Ex: PlayStation 5, iPhones, Jogos)
+                  <input
+                    placeholder="Ex: PlayStation 5"
+                    value={pSubCategory}
+                    onChange={(e) => setPSubCategory(e.target.value)}
+                  />
+                </label>
+                <label>
+                  Capacidade / Armazenamento
+                  <input
+                    placeholder="Ex: 256GB / 1TB SSD"
+                    value={pStorage}
+                    onChange={(e) => setPStorage(e.target.value)}
+                  />
+                </label>
+                <label>
+                  Cor
+                  <input
+                    placeholder="Ex: Titânio Preto / Branco"
+                    value={pColor}
+                    onChange={(e) => setPColor(e.target.value)}
+                  />
+                </label>
+                <label>
+                  Saúde da Bateria (iPhones/Mobile)
+                  <input
+                    placeholder="Ex: 94% Original"
+                    value={pBatteryHealth}
+                    onChange={(e) => setPBatteryHealth(e.target.value)}
+                  />
+                </label>
+                <label>
+                  Qtd. Jogos Inclusos (se aplicável)
+                  <input
+                    type="number"
+                    min="0"
+                    value={pGamesCount}
+                    onChange={(e) => setPGamesCount(e.target.value)}
+                  />
+                </label>
+                <label>
+                  Parcelamento Máx. (vezes)
+                  <input
+                    type="number"
+                    min="1"
+                    max="24"
+                    value={pInstallmentsMax}
+                    onChange={(e) => setPInstallmentsMax(e.target.value)}
+                  />
+                </label>
+                <label>
+                  Acessórios inclusos
+                  <input
+                    placeholder="Ex: Cabo USB-C + Caixa"
+                    value={pAccessoriesIncluded}
+                    onChange={(e) => setPAccessoriesIncluded(e.target.value)}
+                  />
+                </label>
+              </div>
+
               <label>
                 Galeria de fotos (1 URL por linha)
                 <textarea rows={2} value={pGallery} onChange={(e) => setPGallery(e.target.value)} />
@@ -2841,23 +3377,33 @@ export function AdminDashboard({
                 <textarea rows={3} value={pDesc} onChange={(e) => setPDesc(e.target.value)} />
               </label>
               <label>
-                Ficha técnica (Ex: Armazenamento: 825 GB SSD, 1 por linha)
+                Ficha técnica extra (Ex: Tela: 120Hz OLED, 1 por linha)
                 <textarea
                   rows={2}
                   value={pSpecsText}
                   onChange={(e) => setPSpecsText(e.target.value)}
                 />
               </label>
-              <label className="admin-check-row">
-                <input
-                  type="checkbox"
-                  checked={pFeatured}
-                  onChange={(e) => setPFeatured(e.target.checked)}
-                />
-                Exibir em Ofertas em Destaque na Home
-              </label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
+                <label className="admin-check-row">
+                  <input
+                    type="checkbox"
+                    checked={pFeatured}
+                    onChange={(e) => setPFeatured(e.target.checked)}
+                  />
+                  Exibir em Ofertas em Destaque na Home
+                </label>
+                <label className="admin-check-row">
+                  <input
+                    type="checkbox"
+                    checked={pIsNewArrival}
+                    onChange={(e) => setPIsNewArrival(e.target.checked)}
+                  />
+                  Marcar como Novidade
+                </label>
+              </div>
               <button type="submit" className="primary" disabled={busy}>
-                {busy ? 'Salvando...' : 'Salvar Produto no Firestore'}
+                {busy ? 'Publicando...' : 'Salvar e Publicar no Site'}
               </button>
             </form>
           </div>

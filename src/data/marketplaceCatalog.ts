@@ -1,4 +1,20 @@
-export interface MarketplaceProduct {
+export type StoreDivision = 'mobile' | 'gamer' | 'all';
+
+export interface ProductExtendedMeta {
+  brand?: string;
+  division?: 'mobile' | 'gamer';
+  subCategory?: string;
+  storage?: string;
+  color?: string;
+  batteryHealth?: string;
+  accessoriesIncluded?: string;
+  gamesCount?: number;
+  isNewArrival?: boolean;
+  installmentsMax?: number;
+  nfeIncluded?: boolean;
+}
+
+export interface MarketplaceProduct extends ProductExtendedMeta {
   id: number;
   name: string;
   cat: string;
@@ -19,37 +35,226 @@ export interface MarketplaceProduct {
   specs: { label: string; value: string }[];
 }
 
+export interface StoreBanner {
+  id: string;
+  slot: 'hero' | 'secondary';
+  badge: string;
+  title: string;
+  subtitle: string;
+  ctaLabel: string;
+  targetDivision: 'all' | 'iphones' | 'android' | 'gamer' | 'ofertas';
+  targetCategory: string;
+  image: string;
+  order: number;
+  active: boolean;
+}
+
+export interface StoreCategory {
+  id: string;
+  name: string;
+  slug: string;
+  division: StoreDivision;
+  description: string;
+  image: string;
+  order: number;
+  active: boolean;
+}
+
 export const CHECKOUT_URL_SPEC_KEY = '__CHECKOUT_URL__';
+export const PRODUCT_META_SPEC_KEY = '__BT_META__';
 
 export function extractCheckoutUrlAndCleanSpecs(
   specs: { label: string; value: string }[],
   fallbackUrl?: string
-): { checkoutUrl: string; cleanSpecs: { label: string; value: string }[] } {
+): {
+  checkoutUrl: string;
+  meta: ProductExtendedMeta;
+  cleanSpecs: { label: string; value: string }[];
+} {
   let foundUrl = '';
+  let parsedMeta: ProductExtendedMeta = {};
   const cleanSpecs: { label: string; value: string }[] = [];
+
   for (const item of specs || []) {
-    if (item && item.label === CHECKOUT_URL_SPEC_KEY) {
+    if (!item || !item.label) continue;
+    if (item.label === CHECKOUT_URL_SPEC_KEY) {
       foundUrl = String(item.value || '').trim();
-    } else if (item && item.label) {
+    } else if (item.label === PRODUCT_META_SPEC_KEY) {
+      try {
+        const obj = JSON.parse(String(item.value || '{}')) as ProductExtendedMeta;
+        if (obj && typeof obj === 'object') {
+          parsedMeta = obj;
+        }
+      } catch {
+        // ignore malformed metadata json
+      }
+    } else {
       cleanSpecs.push({ label: String(item.label), value: String(item.value || '') });
     }
   }
+
   return {
     checkoutUrl: foundUrl || (fallbackUrl ? fallbackUrl.trim() : ''),
+    meta: parsedMeta,
     cleanSpecs,
   };
 }
 
 export function mergeCheckoutUrlIntoSpecs(
   specs: { label: string; value: string }[],
-  checkoutUrl?: string
+  checkoutUrl?: string,
+  meta?: ProductExtendedMeta
 ): { label: string; value: string }[] {
-  const clean = (specs || []).filter((s) => s && s.label !== CHECKOUT_URL_SPEC_KEY).slice(0, 14);
+  const clean = (specs || [])
+    .filter((s) => s && s.label !== CHECKOUT_URL_SPEC_KEY && s.label !== PRODUCT_META_SPEC_KEY)
+    .slice(0, 13);
+
   const trimmedUrl = (checkoutUrl || '').trim().slice(0, 500);
   if (trimmedUrl) {
     clean.push({ label: CHECKOUT_URL_SPEC_KEY, value: trimmedUrl });
   }
+
+  if (meta) {
+    const compactMeta: ProductExtendedMeta = {};
+    if (meta.brand) compactMeta.brand = String(meta.brand).slice(0, 40);
+    if (meta.division) compactMeta.division = meta.division;
+    if (meta.subCategory) compactMeta.subCategory = String(meta.subCategory).slice(0, 40);
+    if (meta.storage) compactMeta.storage = String(meta.storage).slice(0, 30);
+    if (meta.color) compactMeta.color = String(meta.color).slice(0, 40);
+    if (meta.batteryHealth) compactMeta.batteryHealth = String(meta.batteryHealth).slice(0, 40);
+    if (meta.accessoriesIncluded)
+      compactMeta.accessoriesIncluded = String(meta.accessoriesIncluded).slice(0, 120);
+    if (typeof meta.gamesCount === 'number' && meta.gamesCount > 0)
+      compactMeta.gamesCount = Math.round(meta.gamesCount);
+    if (meta.isNewArrival) compactMeta.isNewArrival = true;
+    if (typeof meta.installmentsMax === 'number' && meta.installmentsMax > 0)
+      compactMeta.installmentsMax = Math.round(meta.installmentsMax);
+    if (typeof meta.nfeIncluded === 'boolean') compactMeta.nfeIncluded = meta.nfeIncluded;
+
+    if (Object.keys(compactMeta).length > 0) {
+      clean.push({ label: PRODUCT_META_SPEC_KEY, value: JSON.stringify(compactMeta) });
+    }
+  }
+
   return clean;
+}
+
+export function deriveProductMeta(p: MarketplaceProduct): Required<
+  Pick<
+    ProductExtendedMeta,
+    | 'brand'
+    | 'division'
+    | 'subCategory'
+    | 'storage'
+    | 'color'
+    | 'batteryHealth'
+    | 'accessoriesIncluded'
+    | 'gamesCount'
+    | 'isNewArrival'
+    | 'installmentsMax'
+    | 'nfeIncluded'
+  >
+> {
+  const lower = `${p.name} ${p.cat}`.toLowerCase();
+  const isIphone = lower.includes('iphone');
+  const isAndroid =
+    p.cat === 'Smartphones Android' ||
+    lower.includes('samsung') ||
+    lower.includes('galaxy') ||
+    lower.includes('xiaomi') ||
+    lower.includes('redmi') ||
+    lower.includes('motorola') ||
+    lower.includes('android');
+  const isMobile = isIphone || isAndroid || p.cat === 'Celular' || p.cat === 'iPhones';
+
+  let brand = p.brand || 'Brasil Tech';
+  if (!p.brand) {
+    if (isIphone) brand = 'Apple';
+    else if (lower.includes('samsung') || lower.includes('galaxy')) brand = 'Samsung';
+    else if (lower.includes('xiaomi') || lower.includes('redmi')) brand = 'Xiaomi';
+    else if (lower.includes('motorola')) brand = 'Motorola';
+    else if (
+      lower.includes('playstation') ||
+      lower.includes('ps2') ||
+      lower.includes('ps3') ||
+      lower.includes('ps4') ||
+      lower.includes('ps5') ||
+      lower.includes('dualsense')
+    )
+      brand = 'Sony PlayStation';
+    else if (lower.includes('xbox')) brand = 'Microsoft Xbox';
+    else if (lower.includes('nintendo') || lower.includes('wii')) brand = 'Nintendo';
+  }
+
+  let subCategory = p.subCategory || p.cat;
+  if (!p.subCategory) {
+    if (isIphone) subCategory = 'iPhones';
+    else if (isAndroid) subCategory = 'Smartphones Android';
+    else if (lower.includes('ps5') || lower.includes('playstation 5')) subCategory = 'PlayStation 5';
+    else if (lower.includes('ps4') || lower.includes('playstation 4')) subCategory = 'PlayStation 4';
+    else if (lower.includes('ps3') || lower.includes('playstation 3')) subCategory = 'PlayStation 3';
+    else if (lower.includes('ps2') || lower.includes('playstation 2')) subCategory = 'PlayStation 2';
+    else if (lower.includes('xbox series')) subCategory = 'Xbox Series S e X';
+    else if (lower.includes('xbox one')) subCategory = 'Xbox One';
+    else if (lower.includes('xbox 360')) subCategory = 'Xbox 360';
+    else if (lower.includes('jogo') || p.cat === 'Jogos') subCategory = 'Jogos';
+    else if (lower.includes('controle') || lower.includes('dualsense')) subCategory = 'Controles';
+    else if (p.cat === 'Acessórios') subCategory = 'Acessórios';
+    else if (p.cat === 'Nintendo') subCategory = 'Nintendo';
+    else if (p.cat === 'PC Gamer') subCategory = 'PC Gamer';
+  }
+
+  const storageMatch = p.name.match(/(64\s?GB|128\s?GB|256\s?GB|512\s?GB|1\s?TB|500\s?GB|250\s?GB)/i);
+  const storage =
+    p.storage ||
+    p.specs.find((s) => /armazenamento|capacidade/i.test(s.label))?.value ||
+    (storageMatch ? storageMatch[1].toUpperCase().replace(/\s+/, '') : isIphone ? '128GB' : 'Padrão');
+
+  const color =
+    p.color ||
+    (lower.includes('titânio') || lower.includes('titanio')
+      ? 'Titânio Natural'
+      : lower.includes('branco')
+        ? 'Branco'
+        : lower.includes('preto') || lower.includes('obsidian')
+          ? 'Preto Space'
+          : isIphone
+            ? 'Grafite / Preto'
+            : 'Padrão');
+
+  const batteryHealth =
+    p.batteryHealth ||
+    p.specs.find((s) => /bateria/i.test(s.label))?.value ||
+    (isIphone ? (lower.includes('lacrado') || lower.includes('17') ? '100% Original' : '92%+ Verificada') : 'N/A');
+
+  const accessoriesIncluded =
+    p.accessoriesIncluded ||
+    p.specs.find((s) => /acompanha|incluso|kit/i.test(s.label))?.value ||
+    (isIphone
+      ? 'Cabo USB-C / Lightning certificado + Caixa Brasil Tech'
+      : isMobile
+        ? 'Carregador + Cabo USB-C + Película aplicada'
+        : 'Console/Item + Cabos completos testados em bancada');
+
+  return {
+    brand,
+    division: p.division || (isMobile ? 'mobile' : 'gamer'),
+    subCategory,
+    storage,
+    color,
+    batteryHealth,
+    accessoriesIncluded,
+    gamesCount: typeof p.gamesCount === 'number' ? p.gamesCount : 0,
+    isNewArrival: Boolean(p.isNewArrival || p.id >= 31 || p.id === 16 || p.id === 17),
+    installmentsMax: p.installmentsMax || 12,
+    nfeIncluded: p.nfeIncluded !== false,
+  };
+}
+
+export function formatInstallmentText(price: number, maxInstallments = 12): string {
+  const count = Math.max(1, Math.min(12, maxInstallments));
+  const value = price / count;
+  return `em até ${count}x de ${money(value)}`;
 }
 
 export interface CartEntry {
@@ -81,7 +286,7 @@ export interface MarketplaceOrder {
   subtotal: number;
   discount: number;
   total: number;
-  statusStep: number; // 0: Confirmado, 1: Em separação, 2: Em transporte, 3: Saiu para entrega, 4: Entregue
+  statusStep: number;
   trackingCode: string;
 }
 
@@ -102,16 +307,177 @@ export interface ProductQuestion {
   date: string;
 }
 
-export const CATEGORIES = ['PlayStation', 'Xbox', 'Nintendo', 'PC Gamer', 'Celular', 'Acessórios'];
-
-export const CATEGORY_CARDS = [
-  { cat: 'PlayStation', emoji: '🎮', icon: '/src/assets/ref/cats/playstation.png' },
-  { cat: 'Xbox', emoji: '🎮', icon: '/src/assets/ref/cats/xbox.png' },
-  { cat: 'Nintendo', emoji: '🕹️', icon: '/src/assets/ref/cats/nintendo.png' },
-  { cat: 'PC Gamer', emoji: '💻', icon: '/src/assets/ref/cats/pcgamer.png' },
-  { cat: 'Celular', emoji: '📱', icon: '/src/assets/ref/cats/celular.png' },
-  { cat: 'Acessórios', emoji: '🎧', icon: '/src/assets/ref/cats/acessorios.png' },
+export const CATEGORIES = [
+  'iPhones',
+  'Smartphones Android',
+  'PlayStation',
+  'Xbox',
+  'Nintendo',
+  'PC Gamer',
+  'Jogos',
+  'Acessórios',
 ];
+
+export const DEFAULT_CATEGORIES: StoreCategory[] = [
+  {
+    id: 'cat-iphones',
+    name: 'iPhones',
+    slug: 'iphones',
+    division: 'mobile',
+    description: 'Linha Apple certificada com saúde de bateria verificada',
+    image: '/src/assets/ref/products/iphone16promax.webp',
+    order: 1,
+    active: true,
+  },
+  {
+    id: 'cat-android',
+    name: 'Smartphones Android',
+    slug: 'smartphones-android',
+    division: 'mobile',
+    description: 'Samsung Galaxy, Xiaomi e smartphones 5G desbloqueados',
+    image: '/src/assets/images/product_samsung_s24_ultra_1795528216041.jpg',
+    order: 2,
+    active: true,
+  },
+  {
+    id: 'cat-playstation',
+    name: 'PlayStation',
+    slug: 'playstation',
+    division: 'gamer',
+    description: 'PS5, PS4 Slim, PS3 e PS2 revisados em bancada',
+    image: '/src/assets/ref/cats/playstation.png',
+    order: 3,
+    active: true,
+  },
+  {
+    id: 'cat-xbox',
+    name: 'Xbox',
+    slug: 'xbox',
+    division: 'gamer',
+    description: 'Xbox Series X, Series S, Xbox One e Xbox 360',
+    image: '/src/assets/ref/cats/xbox.png',
+    order: 4,
+    active: true,
+  },
+  {
+    id: 'cat-videogames',
+    name: 'Videogames',
+    slug: 'videogames',
+    division: 'gamer',
+    description: 'Nintendo, consoles clássicos e PCs Gamer prontos',
+    image: '/src/assets/ref/cats/pcgamer.png',
+    order: 5,
+    active: true,
+  },
+  {
+    id: 'cat-jogos',
+    name: 'Jogos',
+    slug: 'jogos',
+    division: 'gamer',
+    description: 'Mídias físicas e pacotes colecionadores PS4, PS5 e Xbox',
+    image: '/src/assets/images/product_ps5_games_pack_1795528217917.jpg',
+    order: 6,
+    active: true,
+  },
+  {
+    id: 'cat-acessorios',
+    name: 'Acessórios',
+    slug: 'acessorios',
+    division: 'gamer',
+    description: 'Controles DualSense, Xbox Wireless, DualShock e cabos',
+    image: '/src/assets/images/product_dualsense_controller_1795528216838.jpg',
+    order: 7,
+    active: true,
+  },
+];
+
+export const DEFAULT_BANNERS: StoreBanner[] = [
+  {
+    id: 'hero-main',
+    slot: 'hero',
+    badge: 'Brasil Tech Mobile & Gamer',
+    title: 'Tecnologia selecionada em iPhones, Android e consoles com garantia real.',
+    subtitle:
+      'Aparelhos revisados com laudo técnico de 28 pontos, nota fiscal, rastreamento ao vivo no mapa e devolução garantida em até 7 dias.',
+    ctaLabel: 'Explorar iPhones',
+    targetDivision: 'iphones',
+    targetCategory: 'Celular',
+    image: '/src/assets/images/hero_brasil_tech_modern_1795528215223.jpg',
+    order: 1,
+    active: true,
+  },
+  {
+    id: 'sec-iphones',
+    slot: 'secondary',
+    badge: 'Brasil Tech Mobile',
+    title: 'Ofertas em iPhones',
+    subtitle: 'Do XR ao 17 Pro com iCloud limpo, bateria certificada e garantia de até 12 meses.',
+    ctaLabel: 'Ver linha Apple',
+    targetDivision: 'iphones',
+    targetCategory: 'Celular',
+    image: '/src/assets/ref/products/iphone14pro.webp',
+    order: 1,
+    active: true,
+  },
+  {
+    id: 'sec-android',
+    slot: 'secondary',
+    badge: 'Linha 5G Desbloqueada',
+    title: 'Smartphones Android',
+    subtitle: 'Samsung Galaxy Ultra e Xiaomi Pro revisados e prontos para uso imediato.',
+    ctaLabel: 'Ver Android',
+    targetDivision: 'android',
+    targetCategory: 'Smartphones Android',
+    image: '/src/assets/images/banner_android_showcase_1795528215423.jpg',
+    order: 2,
+    active: true,
+  },
+  {
+    id: 'sec-playstation',
+    slot: 'secondary',
+    badge: 'Brasil Tech Gamer',
+    title: 'Linha PlayStation',
+    subtitle: 'PS5 Digital, PS4 Slim, PS3 e PS2 revisados com controle e cabos originais.',
+    ctaLabel: 'Explorar PlayStation',
+    targetDivision: 'gamer',
+    targetCategory: 'PlayStation',
+    image: '/src/assets/ref/products/ps5-digital.jpg',
+    order: 3,
+    active: true,
+  },
+  {
+    id: 'sec-xbox',
+    slot: 'secondary',
+    badge: 'Nova & Clássica Geração',
+    title: 'Linha Xbox',
+    subtitle: 'Xbox Series X 4K, Series S, Xbox One e Xbox 360 com entrega protegida.',
+    ctaLabel: 'Explorar Xbox',
+    targetDivision: 'gamer',
+    targetCategory: 'Xbox',
+    image: '/src/assets/images/banner_gamer_setup_1795528216542.jpg',
+    order: 4,
+    active: true,
+  },
+  {
+    id: 'sec-acessorios',
+    slot: 'secondary',
+    badge: 'Controles & Jogos',
+    title: 'Acessórios Gamer',
+    subtitle: 'Controles DualSense, Xbox Wireless e pacotes de jogos testados.',
+    ctaLabel: 'Ver Acessórios',
+    targetDivision: 'gamer',
+    targetCategory: 'Acessórios',
+    image: '/src/assets/images/product_dualsense_controller_1795528216838.jpg',
+    order: 5,
+    active: true,
+  },
+];
+
+export const CATEGORY_CARDS = DEFAULT_CATEGORIES.map((c) => ({
+  cat: c.name,
+  emoji: c.division === 'mobile' ? '📱' : '🎮',
+  icon: c.image,
+}));
 
 export const PRODUCTS: MarketplaceProduct[] = [
   // PlayStation
@@ -501,7 +867,7 @@ export const PRODUCTS: MarketplaceProduct[] = [
     ],
   },
 
-  // Celular
+  // iPhones (Celular)
   {
     id: 16,
     name: 'iPhone 17 Pro',
@@ -512,6 +878,9 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '5,0',
     reviews: 86,
     featured: false,
+    storage: '256GB',
+    color: 'Titânio Natural',
+    batteryHealth: '100% Original',
     desc: 'iPhone 17 Pro desbloqueado Anatel com acabamento premium, câmeras profissionais e garantia total Brasil Tech.',
     image: '/src/assets/ref/products/iphone17pro.webp',
     images: [
@@ -523,6 +892,7 @@ export const PRODUCTS: MarketplaceProduct[] = [
     warranty: '12 meses com a Brasil Tech',
     condition: 'Original lacrado / Vitrine',
     specs: [
+      { label: 'Armazenamento', value: '256 GB' },
       { label: 'Rede', value: '5G Desbloqueado Anatel' },
       { label: 'Bateria', value: '100% Saúde verificada' },
       { label: 'Garantia', value: '12 meses + NF' },
@@ -538,6 +908,9 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '5,0',
     reviews: 1284,
     featured: true,
+    storage: '256GB',
+    color: 'Titânio Natural',
+    batteryHealth: '96% Saúde certificada',
     desc: 'iPhone 16 Pro Max 256GB Titânio 5G desbloqueado para todas as operadoras, câmera tripla 48MP e Face ID 100% testado.',
     image: '/src/assets/ref/products/iphone16promax.webp',
     images: [
@@ -564,6 +937,9 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '5,0',
     reviews: 118,
     featured: false,
+    storage: '128GB',
+    color: 'Preto',
+    batteryHealth: '94% Saúde certificada',
     desc: 'iPhone 15 128GB com Dynamic Island, câmera principal de 48MP, porta USB-C e bateria certificada.',
     image: '/src/assets/ref/products/iphone15.jpg',
     images: ['/src/assets/ref/products/iphone15.jpg'],
@@ -587,6 +963,9 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '5,0',
     reviews: 482,
     featured: true,
+    storage: '128GB',
+    color: 'Roxo Profundo',
+    batteryHealth: '93%+ Verificada',
     desc: 'O equilíbrio perfeito entre design Pro em aço inoxidável, Dynamic Island, tela ProMotion 120Hz e câmera Pro de 48MP. Saúde de bateria certificada acima de 90%, iCloud limpo, desbloqueado Anatel e 12 meses de garantia Brasil Tech.',
     image: '/src/assets/ref/products/iphone14pro.webp',
     images: [
@@ -613,6 +992,9 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '5,0',
     reviews: 538,
     featured: true,
+    storage: '128GB',
+    color: 'Azul Sierra',
+    batteryHealth: '91%+ Verificada',
     desc: 'Campeão em custo-benefício na linha Pro: tela Super Retina XDR 120Hz ultrarrápida, câmera tripla com modo Cinema 4K, chip A15 Bionic e bateria certificada acima de 90%. Acompanha laudo técnico, NF-e e 12 meses de garantia.',
     image: '/src/assets/ref/products/iphone13pro.webp',
     images: [
@@ -639,6 +1021,9 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '5,0',
     reviews: 196,
     featured: false,
+    storage: '128GB',
+    color: 'Estelar Branco',
+    batteryHealth: '90%+ Verificada',
     desc: 'iPhone 13 128GB com tela Super Retina XDR, ótimo desempenho no dia a dia e excelente autonomia de bateria.',
     image: '/src/assets/ref/products/iphone13.webp',
     images: [
@@ -665,6 +1050,9 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '5,0',
     reviews: 164,
     featured: false,
+    storage: '128GB',
+    color: 'Grafite',
+    batteryHealth: '89%+ Verificada',
     desc: 'iPhone 12 Pro 128GB com acabamento em aço inoxidável, scanner LiDAR e câmera tripla 12MP.',
     image: '/src/assets/ref/products/iphone12pro.webp',
     images: [
@@ -691,6 +1079,9 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '5,0',
     reviews: 234,
     featured: false,
+    storage: '128GB',
+    color: 'Preto',
+    batteryHealth: '88%+ Verificada',
     desc: 'iPhone 11 128GB desbloqueado para todas as operadoras, iCloud limpo e Face ID 100% testado em laboratório.',
     image: '/src/assets/ref/products/iphone11-live.webp',
     images: [
@@ -718,6 +1109,9 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '5,0',
     reviews: 156,
     featured: false,
+    storage: '128GB',
+    color: 'Preto',
+    batteryHealth: '87%+ Verificada',
     desc: 'iPhone XR 128GB com Face ID e tela Liquid Retina de 6,1 polegadas. Revisado e pronto para uso.',
     image: '/src/assets/ref/products/iphonexr-live.jpg',
     images: [
@@ -745,6 +1139,9 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '5,0',
     reviews: 189,
     featured: false,
+    storage: '128GB',
+    color: 'Prata',
+    batteryHealth: '88%+ Verificada',
     desc: 'iPhone 8 Plus 128GB com Touch ID e câmera dupla com modo Retrato. Ótima opção econômica com garantia.',
     image: '/src/assets/ref/products/iphone8plus.webp',
     images: [
@@ -771,6 +1168,9 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '4,9',
     reviews: 214,
     featured: false,
+    storage: '64GB',
+    color: 'Branco',
+    batteryHealth: '87%+ Verificada',
     desc: 'Aparelho econômico ideal para o dia a dia: iPhone XR 64GB com Face ID funcionando, bateria revisada, iCloud limpo e garantia Brasil Tech.',
     image: '/src/assets/ref/products/iphonexr.webp',
     images: [
@@ -797,6 +1197,9 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '4,9',
     reviews: 276,
     featured: false,
+    storage: '64GB',
+    color: 'Branco',
+    batteryHealth: '88%+ Verificada',
     desc: 'iPhone 11 64GB com câmera dupla Ultra-Angular, gravação 4K e Face ID testado. Excelente preço de entrada na linha Apple.',
     image: '/src/assets/ref/products/iphone11.webp',
     images: [
@@ -867,8 +1270,6 @@ export const PRODUCTS: MarketplaceProduct[] = [
       { label: 'Garantia', value: '90 dias Brasil Tech' },
     ],
   },
-
-  // Acessórios
   {
     id: 26,
     name: 'Controle PS2 DualShock 2 Original',
@@ -879,6 +1280,7 @@ export const PRODUCTS: MarketplaceProduct[] = [
     rating: '4,9',
     reviews: 142,
     featured: false,
+    subCategory: 'Controles',
     desc: 'Controle DualShock 2 com resposta precisa, analógicos calibrados e cabo reforçado para PlayStation 2.',
     image: '/src/assets/ref/products/controle-ps2.webp',
     images: ['/src/assets/ref/products/controle-ps2.webp'],
@@ -890,6 +1292,191 @@ export const PRODUCTS: MarketplaceProduct[] = [
       { label: 'Compatibilidade', value: 'PS2 Fat e PS2 Slim' },
       { label: 'Vibração', value: 'DualShock Dupla' },
       { label: 'Garantia', value: '90 dias Brasil Tech' },
+    ],
+  },
+
+  // Expansão Brasil Tech Mobile (Android) & Gamer (Controles e Jogos)
+  {
+    id: 31,
+    name: 'Samsung Galaxy S24 Ultra 256GB 5G - Titânio',
+    cat: 'Smartphones Android',
+    emoji: '📱',
+    price: 3890,
+    old: 5499,
+    rating: '5,0',
+    reviews: 94,
+    featured: true,
+    brand: 'Samsung',
+    division: 'mobile',
+    subCategory: 'Smartphones Android',
+    storage: '256GB',
+    color: 'Titânio Cinza',
+    batteryHealth: '98% Saúde certificada',
+    isNewArrival: true,
+    desc: 'Samsung Galaxy S24 Ultra 256GB 5G com S Pen integrada, tela Dynamic AMOLED 2X de 6,8" 120Hz, câmera de 200MP e acabamento em titânio. Revisado, desbloqueado Anatel e com garantia Brasil Tech.',
+    image: '/src/assets/images/product_samsung_s24_ultra_1795528216041.jpg',
+    images: [
+      '/src/assets/images/product_samsung_s24_ultra_1795528216041.jpg',
+      '/src/assets/images/banner_android_showcase_1795528215423.jpg',
+    ],
+    stock: 6,
+    sold: 118,
+    warranty: '12 meses com a Brasil Tech',
+    condition: 'Seminovo Vitrine (Grau A+)',
+    specs: [
+      { label: 'Armazenamento', value: '256 GB + 12 GB RAM' },
+      { label: 'Tela & Taxa', value: '6,8" AMOLED 2X 120Hz' },
+      { label: 'Acompanha', value: 'Aparelho + S Pen + Cabo USB-C' },
+    ],
+  },
+  {
+    id: 32,
+    name: 'Xiaomi 14 Pro 512GB 5G - Preto Obsidian',
+    cat: 'Smartphones Android',
+    emoji: '📱',
+    price: 2790,
+    old: 3990,
+    rating: '4,9',
+    reviews: 72,
+    featured: true,
+    brand: 'Xiaomi',
+    division: 'mobile',
+    subCategory: 'Smartphones Android',
+    storage: '512GB',
+    color: 'Preto Obsidian',
+    batteryHealth: '97% Saúde certificada',
+    isNewArrival: true,
+    desc: 'Xiaomi 14 Pro 512GB com 12GB de RAM, conjunto fotográfico triplo 50MP, carregamento ultrarrápido e tela LTPO AMOLED 120Hz. Desbloqueado Global com garantia.',
+    image: '/src/assets/images/product_xiaomi_14_pro_1795528216562.jpg',
+    images: [
+      '/src/assets/images/product_xiaomi_14_pro_1795528216562.jpg',
+      '/src/assets/images/banner_android_showcase_1795528215423.jpg',
+    ],
+    stock: 7,
+    sold: 84,
+    warranty: '6 meses com a Brasil Tech',
+    condition: 'Seminovo certificado',
+    specs: [
+      { label: 'Capacidade', value: '512 GB UFS 4.0 + 12 GB RAM' },
+      { label: 'Processador', value: 'Snapdragon 8 Gen 3' },
+      { label: 'Acompanha', value: 'Aparelho + Carregador Turbo + Cabo' },
+    ],
+  },
+  {
+    id: 33,
+    name: 'Samsung Galaxy S23 128GB 5G - Grafite',
+    cat: 'Smartphones Android',
+    emoji: '📱',
+    price: 1890,
+    old: 2890,
+    rating: '4,9',
+    reviews: 109,
+    featured: false,
+    brand: 'Samsung',
+    division: 'mobile',
+    subCategory: 'Smartphones Android',
+    storage: '128GB',
+    color: 'Preto Grafite',
+    batteryHealth: '94% Saúde certificada',
+    isNewArrival: true,
+    desc: 'Compacto de alto desempenho com Snapdragon 8 Gen 2, proteção IP68, câmera tripla Nightography e 5G nacional desbloqueado.',
+    image: '/src/assets/images/banner_android_showcase_1795528215423.jpg',
+    images: ['/src/assets/images/banner_android_showcase_1795528215423.jpg'],
+    stock: 9,
+    sold: 136,
+    warranty: '6 meses com a Brasil Tech',
+    condition: 'Seminovo Vitrine (Grau A+)',
+    specs: [
+      { label: 'Armazenamento', value: '128 GB + 8 GB RAM' },
+      { label: 'Tela', value: '6,1" Dynamic AMOLED 120Hz' },
+      { label: 'Proteção', value: 'IP68 Resistente à água' },
+    ],
+  },
+  {
+    id: 34,
+    name: 'Controle Sony DualSense PS5 Sem Fio Original - Branco',
+    cat: 'Acessórios',
+    emoji: '🎮',
+    price: 349,
+    old: 499,
+    rating: '5,0',
+    reviews: 184,
+    featured: false,
+    brand: 'Sony PlayStation',
+    division: 'gamer',
+    subCategory: 'Controles',
+    color: 'Branco Glacial',
+    isNewArrival: true,
+    desc: 'Controle DualSense original para PlayStation 5 e PC com resposta tátil, gatilhos adaptáveis e microfone integrado. Analógicos 100% calibrados sem drift.',
+    image: '/src/assets/images/product_dualsense_controller_1795528216838.jpg',
+    images: ['/src/assets/images/product_dualsense_controller_1795528216838.jpg'],
+    stock: 14,
+    sold: 245,
+    warranty: '6 meses com a Brasil Tech',
+    condition: 'Seminovo Revisado Original',
+    specs: [
+      { label: 'Compatibilidade', value: 'PlayStation 5, PC e Mobile' },
+      { label: 'Recursos', value: 'Gatilhos adaptáveis + Feedback háptico' },
+      { label: 'Conexão', value: 'Bluetooth 5.1 / USB-C' },
+    ],
+  },
+  {
+    id: 35,
+    name: 'Kit Jogos PS5 Mídia Física Coleção + Steelbook (3 Títulos)',
+    cat: 'Jogos',
+    emoji: '💿',
+    price: 279,
+    old: 449,
+    rating: '4,9',
+    reviews: 63,
+    featured: false,
+    brand: 'Sony PlayStation',
+    division: 'gamer',
+    subCategory: 'Jogos',
+    gamesCount: 3,
+    isNewArrival: true,
+    desc: 'Pacote com 3 títulos em mídia física Blu-ray para PlayStation 5 em excelente estado de conservação, mídias sem riscos e testadas antes do envio.',
+    image: '/src/assets/images/product_ps5_games_pack_1795528217917.jpg',
+    images: ['/src/assets/images/product_ps5_games_pack_1795528217917.jpg'],
+    stock: 11,
+    sold: 92,
+    warranty: '90 dias com a Brasil Tech',
+    condition: 'Mídia Física Original Testada',
+    specs: [
+      { label: 'Quantidade de jogos', value: '3 Títulos em Mídia Física' },
+      { label: 'Plataforma', value: 'PlayStation 5 (Leitor de Disco)' },
+      { label: 'Idioma', value: 'Português / Legendas PT-BR' },
+    ],
+  },
+  {
+    id: 36,
+    name: 'PlayStation 5 Slim 1TB + 2 Jogos em Mídia Física',
+    cat: 'PlayStation',
+    emoji: '🎮',
+    price: 2390,
+    old: 3490,
+    rating: '5,0',
+    reviews: 112,
+    featured: false,
+    brand: 'Sony PlayStation',
+    division: 'gamer',
+    subCategory: 'PlayStation 5',
+    gamesCount: 2,
+    isNewArrival: true,
+    desc: 'PlayStation 5 Slim com SSD de 1TB, leitor de disco, controle DualSense original e 2 jogos em mídia física inclusos. Testado em bancada com garantia.',
+    image: '/src/assets/images/banner_gamer_setup_1795528216542.jpg',
+    images: [
+      '/src/assets/images/banner_gamer_setup_1795528216542.jpg',
+      '/src/assets/ref/products/ps5-digital.jpg',
+    ],
+    stock: 6,
+    sold: 128,
+    warranty: '6 meses com a Brasil Tech',
+    condition: 'Seminovo Vitrine (Grau A+)',
+    specs: [
+      { label: 'Armazenamento', value: '1 TB SSD NVMe' },
+      { label: 'Jogos Inclusos', value: '2 Jogos Originais em Mídia Física' },
+      { label: 'Acompanha', value: 'Console + DualSense + Cabos + 2 Jogos' },
     ],
   },
 ];
@@ -923,7 +1510,7 @@ export const STORE_REVIEWS: StoreReview[] = [
     rating: 5,
     date: 'Há 1 semana',
     comment:
-      'Paguei no PIX com desconto e recebi o código de rastreio logo após a confirmação. Console silencioso, parece novo de loja.',
+      'Paguei no PIX e recebi o código de rastreio logo após a confirmação. Console silencioso, parece novo de loja.',
   },
   {
     id: 4,
@@ -933,36 +1520,36 @@ export const STORE_REVIEWS: StoreReview[] = [
     rating: 5,
     date: 'Há 1 semana',
     comment:
-      'Comprei para o meu filho e veio tudo montado, só ligar na tomada. Experiência nível Mercado Livre e Amazon, muito seguro.',
+      'Comprei para o meu filho e veio tudo montado, só ligar na tomada. Experiência excelente e atendimento muito atencioso.',
   },
 ];
 
 export const DEFAULT_QA: ProductQuestion[] = [
   {
     id: 1,
-    question: 'O produto tem garantia e nota de compra?',
+    question: 'O produto tem garantia e nota fiscal?',
     answer:
-      'Sim! Todos os produtos contam com garantia de 90 dias a 12 meses direto com a Brasil Tech e comprovante de pedido com Compra Garantida.',
+      'Sim! Todos os produtos contam com garantia real de 90 dias a 12 meses direto com a Brasil Tech, nota fiscal quando aplicável e política de devolução em 7 dias.',
     date: 'Respondida pela Brasil Tech',
   },
   {
     id: 2,
-    question: 'Como funciona o pagamento via PIX?',
+    question: 'Como funciona o pagamento e a confirmação?',
     answer:
-      'Aceitamos pagamento via PIX com aprovação imediata, nota fiscal e total proteção da Compra Garantida Brasil Tech com reembolso em 7 dias.',
+      'Aceitamos pagamento via PIX e opções disponíveis no checkout com emissão imediata de pedido, código de rastreio e suporte direto pelo WhatsApp.',
     date: 'Respondida pela Brasil Tech',
   },
   {
     id: 3,
     question: 'Qual o prazo de entrega e como acompanho o pedido?',
     answer:
-      'Você pode escolher Entrega Expressa no mesmo dia (R$ 30,00) ou Padrão em até 2 dias úteis (R$ 15,00), com código de rastreamento em tempo real direto na aba Meus Pedidos.',
+      'Você pode consultar o prazo direto pelo seu CEP ou região identificada, com código de rastreamento em tempo real no mapa direto na aba Meus Pedidos.',
     date: 'Respondida pela Brasil Tech',
   },
 ];
 
 export const COUPONS: Record<string, { type: 'percent' | 'fixed'; value: number; label: string }> = {
-  NATAL50: { type: 'fixed', value: 50, label: 'R$ 50,00 OFF Especial Natal' },
+  BEMVINDO50: { type: 'fixed', value: 50, label: 'R$ 50,00 OFF Boas-Vindas Brasil Tech' },
   PRIMEIRACOMPRA: { type: 'fixed', value: 25, label: 'R$ 25,00 OFF Primeira Compra' },
 };
 

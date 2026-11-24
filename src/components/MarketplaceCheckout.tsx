@@ -22,12 +22,23 @@ import {
   PersistedCoupon,
   PersistedTracking,
   StoreSettings,
+  isValidTrackingCodeFormat,
   normalizeTrackingLookupInput,
   subscribeLiveTrackingByCode,
 } from '../services/firestoreStore';
 import { VisitorRegion } from '../services/regionLookup';
+import { trackMetaInitiateCheckout, trackMetaPurchase } from '../lib/metaPixel';
 import { LiveTrackingMap } from './LiveTrackingMap';
 import { TrackingDocumentsModal } from './TrackingDocumentsModal';
+
+interface MercadoPagoPixState {
+  paymentId: string;
+  orderCode: string;
+  status: string;
+  qrCode: string;
+  qrCodeBase64: string;
+  ticketUrl: string;
+}
 
 interface CheckoutViewProps {
   cart: CartEntry[];
@@ -41,6 +52,8 @@ interface CheckoutViewProps {
   selectedShipping: 'express' | 'standard';
   onChangeShipping: (method: 'express' | 'standard') => void;
   onChangeItemQty?: (productId: number, delta: number) => void;
+  onRemoveItem?: (productId: number) => void;
+  onClearCart?: () => void;
   onUpdateCep: (cep: string) => void;
   onPlaceOrder?: (
     order: MarketplaceOrder,
@@ -128,13 +141,18 @@ export function CheckoutView({
   selectedShipping,
   onChangeShipping,
   onChangeItemQty,
+  onRemoveItem,
+  onClearCart,
   onUpdateCep,
+  onPlaceOrder,
   onRecordDirectCheckout,
   onOpenSecurityPage,
   onBack,
+  onGoOrders,
   onNotify,
 }: CheckoutViewProps) {
   const [name, setName] = useState(currentUser?.displayName || userName || '');
+  const [email, setEmail] = useState(currentUser?.email || '');
   const [phone, setPhone] = useState('');
   const [cep, setCep] = useState(() => formatCepMask(userCep || ''));
   const [street, setStreet] = useState('');
@@ -145,6 +163,10 @@ export function CheckoutView({
   const [cepStatus, setCepStatus] = useState<CepLookupStatus>('idle');
   const [lastFetchedCep, setLastFetchedCep] = useState('');
   const [redirectTriggeredUrl, setRedirectTriggeredUrl] = useState('');
+  const [mpConfigured, setMpConfigured] = useState(false);
+  const [mpBusy, setMpBusy] = useState(false);
+  const [mpPix, setMpPix] = useState<MercadoPagoPixState | null>(null);
+  const [mpPaidOrderCode, setMpPaidOrderCode] = useState('');
 
   const [couponInput, setCouponInput] = useState<string>(() => {
     try {
@@ -167,14 +189,13 @@ export function CheckoutView({
   const cepRequestIdRef = useRef(0);
 
   const couponMap = (() => {
-    const map: Record<string, { type: 'percent' | 'fixed'; value: number; label: string }> = {
-      ...COUPONS,
-    };
+    const map: Record<string, { type: 'percent' | 'fixed'; value: number; label: string }> = {};
+    if (coupons.length === 0) {
+      return { ...COUPONS };
+    }
     coupons.forEach((c) => {
       if (c.active) {
         map[c.code.toUpperCase()] = { type: c.type, value: c.value, label: c.label };
-      } else {
-        delete map[c.code.toUpperCase()];
       }
     });
     return map;
@@ -302,11 +323,74 @@ export function CheckoutView({
     return () => controller.abort();
   }, [cep, lastFetchedCep, onUpdateCep]);
 
+  useEffect(() => {
+    let active = true;
+    fetch('/api/payments/mercadopago/status')
+      .then((res) => (res.ok ? res.json() : { configured: false }))
+      .then((data: { configured?: boolean }) => {
+        if (active) setMpConfigured(Boolean(data.configured));
+      })
+      .catch(() => {
+        if (active) setMpConfigured(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (items.length > 0) {
+      trackMetaInitiateCheckout(
+        items.map((i) => ({ id: i.product.id, qty: i.qty })),
+        totalPix
+      );
+    }
+  }, [items.length, totalPix]);
+
+  useEffect(() => {
+    if (!mpPix || mpPix.status === 'approved') return;
+    const timer = window.setInterval(async () => {
+      try {
+        const res = await fetch(`/api/payments/mercadopago/${encodeURIComponent(mpPix.paymentId)}`, {
+          cache: 'no-store',
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as { status?: string };
+        const nextStatus = String(data.status || 'pending');
+        if (nextStatus !== mpPix.status) {
+          setMpPix((prev) => (prev ? { ...prev, status: nextStatus } : null));
+          if (nextStatus === 'approved') {
+            const { order, orderItems } = buildOrderRecord();
+            order.code = mpPix.orderCode;
+            order.statusStep = 1;
+            order.trackingCode = 'Pagamento PIX confirmado — Em separação';
+            if (onPlaceOrder) {
+              await onPlaceOrder(order, orderItems, appliedCoupon).catch(() => undefined);
+            } else {
+              onRecordDirectCheckout?.(order, orderItems, appliedCoupon);
+            }
+            trackMetaPurchase(
+              order.code,
+              orderItems.map((i) => ({ id: i.id, qty: i.qty })),
+              totalPix
+            );
+            setMpPaidOrderCode(order.code);
+            onClearCart?.();
+            onNotify('Pagamento PIX confirmado pelo Mercado Pago!');
+          }
+        }
+      } catch {
+        // keep polling silently
+      }
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [mpPix, appliedCoupon, onPlaceOrder, onRecordDirectCheckout, onClearCart, onNotify, totalPix]);
+
   const handleApplyCoupon = () => {
     const code = couponInput.trim().toUpperCase();
     if (!code) return;
     if (!couponMap[code]) {
-      onNotify('Cupom não encontrado ou expirado. Experimente NATAL50 ou PRIMEIRACOMPRA.');
+      onNotify('Cupom não encontrado ou expirado. Experimente BEMVINDO50 ou PRIMEIRACOMPRA.');
       return;
     }
     setAppliedCoupon(code);
@@ -439,6 +523,50 @@ export function CheckoutView({
     onNotify('Abrindo WhatsApp com o produto e seus dados já montados!');
   };
 
+  const handleGenerateMercadoPagoPix = async () => {
+    if (!name.trim()) {
+      onNotify('Informe seu nome completo para gerar a cobrança PIX.');
+      return;
+    }
+    const { order, orderItems, cleanCep } = buildOrderRecord();
+    if (cleanCep.replace(/\D/g, '').length === 8) {
+      onUpdateCep(cleanCep);
+    }
+    setMpBusy(true);
+    try {
+      const res = await fetch('/api/payments/mercadopago/pix', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orderCode: order.code,
+          amount: totalPix,
+          description: `${storeSettings.storeName} - Pedido ${order.code}`,
+          payerName: name.trim(),
+          payerEmail: email.trim() || currentUser?.email || '',
+          items: orderItems.map((i) => ({ id: i.id, name: i.name, qty: i.qty, price: i.price })),
+        }),
+      });
+      const data = (await res.json()) as Partial<MercadoPagoPixState> & { error?: string };
+      if (!res.ok || !data.paymentId) {
+        onNotify(data.error || 'Não foi possível gerar o PIX agora.');
+        return;
+      }
+      setMpPix({
+        paymentId: String(data.paymentId),
+        orderCode: order.code,
+        status: String(data.status || 'pending'),
+        qrCode: String(data.qrCode || ''),
+        qrCodeBase64: String(data.qrCodeBase64 || ''),
+        ticketUrl: String(data.ticketUrl || ''),
+      });
+      onNotify('QR Code PIX gerado! Aguardando confirmação oficial do Mercado Pago.');
+    } catch {
+      onNotify('Falha de comunicação ao gerar o PIX.');
+    } finally {
+      setMpBusy(false);
+    }
+  };
+
   const cepDigitsCount = cep.replace(/\D/g, '').length;
   const ipRegionLabel =
     visitorRegion && (visitorRegion.city || visitorRegion.uf)
@@ -496,12 +624,22 @@ export function CheckoutView({
           <div className="checkout-card">
             <h2>1. Seus dados de contato e CEP</h2>
             <div className="form-grid-2">
-              <label className="span-2">
+              <label>
                 <span>Seu nome completo</span>
                 <input
                   placeholder="Ex: João Silva"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
+                />
+              </label>
+
+              <label>
+                <span>E-mail para nota e comprovante</span>
+                <input
+                  type="email"
+                  placeholder="seuemail@exemplo.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
                 />
               </label>
 
@@ -714,7 +852,12 @@ export function CheckoutView({
             <div className="checkout-items">
               {items.map(({ product, qty }) => (
                 <div className="checkout-mini-item" key={product.id}>
-                  <img src={product.image} alt={product.name} referrerPolicy="no-referrer" />
+                  <img
+                    src={product.image}
+                    alt={product.name}
+                    decoding="async"
+                    referrerPolicy="no-referrer"
+                  />
                   <div>
                     <b>{product.name}</b>
                     <small>
@@ -737,10 +880,26 @@ export function CheckoutView({
                         >
                           +
                         </button>
+                        {onRemoveItem && items.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => onRemoveItem(product.id)}
+                            style={{
+                              width: 'auto',
+                              padding: '0 8px',
+                              fontSize: 11,
+                              color: '#DC2626',
+                              borderColor: '#FECACA',
+                              background: '#FEF2F2',
+                            }}
+                          >
+                            Remover
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
-                  <span>{money(product.price * qty)}</span>
+                  <span className="checkout-mini-price">{money(product.price * qty)}</span>
                 </div>
               ))}
             </div>
@@ -748,7 +907,7 @@ export function CheckoutView({
             <div className="coupon-box">
               <input
                 type="text"
-                placeholder="Cupom (ex: NATAL50, PRIMEIRACOMPRA)"
+                placeholder="Cupom (ex: BEMVINDO50, PRIMEIRACOMPRA)"
                 value={couponInput}
                 onChange={(e) => setCouponInput(e.target.value)}
               />
@@ -787,21 +946,83 @@ export function CheckoutView({
             </div>
 
             <div className="checkout-cta-stack">
-              <a
-                href={directBuyUrl || '#finalizar-whatsapp'}
-                target={directBuyUrl ? '_blank' : undefined}
-                rel={directBuyUrl ? 'noopener noreferrer' : undefined}
-                className="checkout-go-buy-btn"
-                onClick={handleGoToProductLink}
-              >
-                <span>Ir para a compra</span>
-                <ArrowRight size={17} strokeWidth={2.5} />
-              </a>
+              {mpConfigured && (
+                <div className="border border-blue-200 bg-blue-50/70 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-900">
+                    <span>PIX Oficial Mercado Pago</span>
+                    <span className="text-blue-700">Confirmação automática</span>
+                  </div>
 
-              {!directBuyUrl && (
+                  {mpPaidOrderCode ? (
+                    <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-2">
+                      <strong>Pagamento confirmado! Pedido {mpPaidOrderCode}</strong>
+                      <p className="m-0">
+                        Recebemos sua confirmação PIX pelo Mercado Pago. Acompanhe seu envio em
+                        Meus Pedidos.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={onGoOrders}
+                        className="w-full py-2 rounded-lg bg-emerald-600 text-white font-semibold"
+                      >
+                        Acompanhar meu pedido →
+                      </button>
+                    </div>
+                  ) : mpPix ? (
+                    <div className="space-y-3 text-center">
+                      {mpPix.qrCodeBase64 && (
+                        <img
+                          src={`data:image/png;base64,${mpPix.qrCodeBase64}`}
+                          alt="QR Code PIX Mercado Pago"
+                          className="w-44 h-44 mx-auto rounded-lg border border-slate-200 bg-white p-2"
+                        />
+                      )}
+                      {mpPix.qrCode && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard?.writeText(mpPix.qrCode);
+                            onNotify('Código PIX Copia e Cola copiado!');
+                          }}
+                          className="w-full py-2.5 px-3 rounded-lg bg-slate-900 text-white text-xs font-semibold"
+                        >
+                          Copiar código PIX Copia e Cola
+                        </button>
+                      )}
+                      <div className="text-[11px] text-slate-600">
+                        Aguardando confirmação em tempo real do Mercado Pago...
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={mpBusy}
+                      onClick={handleGenerateMercadoPagoPix}
+                      className="checkout-go-buy-btn"
+                    >
+                      {mpBusy ? 'Gerando QR Code PIX...' : `Gerar PIX de ${money(totalPix)}`}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {directBuyUrl && (
+                <a
+                  href={directBuyUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="checkout-go-buy-btn"
+                  onClick={handleGoToProductLink}
+                >
+                  <span>Ir para o pagamento</span>
+                  <ArrowRight size={17} strokeWidth={2.5} />
+                </a>
+              )}
+
+              {!mpConfigured && !directBuyUrl && (
                 <div className="checkout-no-link-alert">
-                  Link direto deste produto ainda não cadastrado — clique abaixo para finalizar
-                  direto no WhatsApp com o produto e seus dados já preenchidos.
+                  Finalize diretamente pelo WhatsApp com atendimento humano: geramos a chave PIX
+                  oficial e conferimos seus dados na hora.
                 </div>
               )}
 
@@ -894,6 +1115,7 @@ export function OrdersTrackingView({
     () => normalizeTrackingLookupInput(initialTrackingCode || '')
   );
   const [searching, setSearching] = useState(false);
+  const [lookupNonce, setLookupNonce] = useState(0);
   const [searchedCode, setSearchedCode] = useState<string | null>(() => {
     const clean = normalizeTrackingLookupInput(initialTrackingCode || '');
     return clean || null;
@@ -907,6 +1129,7 @@ export function OrdersTrackingView({
     if (clean) {
       setTrackingInput(clean);
       setSearchedCode(clean);
+      setLookupNonce((n) => n + 1);
     }
   }, [initialTrackingCode]);
 
@@ -914,6 +1137,12 @@ export function OrdersTrackingView({
   useEffect(() => {
     if (!searchedCode) {
       setFoundTracking(null);
+      setSearching(false);
+      return;
+    }
+    if (!isValidTrackingCodeFormat(searchedCode)) {
+      setFoundTracking(null);
+      setLookupRulesError(false);
       setSearching(false);
       return;
     }
@@ -928,7 +1157,7 @@ export function OrdersTrackingView({
       }
     });
     return unsub;
-  }, [searchedCode]);
+  }, [searchedCode, lookupNonce]);
 
   const executeTrackingLookup = (rawCode: string) => {
     const clean = normalizeTrackingLookupInput(rawCode);
@@ -936,9 +1165,18 @@ export function OrdersTrackingView({
       onNotify?.(`Digite o código de rastreio fornecido pela ${storeSettings.storeName}.`);
       return;
     }
+    if (!isValidTrackingCodeFormat(clean)) {
+      onNotify?.('Digite o código completo (mínimo 3 letras ou números, ex: BT849201BR).');
+      setTrackingInput(clean);
+      setSearchedCode(clean);
+      setFoundTracking(null);
+      setSearching(false);
+      return;
+    }
     setTrackingInput(clean);
     setLookupRulesError(false);
     setSearchedCode(clean);
+    setLookupNonce((n) => n + 1);
   };
 
   const handleTrackingSubmit = (e: FormEvent) => {

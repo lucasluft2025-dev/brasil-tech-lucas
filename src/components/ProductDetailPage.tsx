@@ -14,10 +14,14 @@ import {
   CHECKOUT_URL_SPEC_KEY,
   DEFAULT_QA,
   MarketplaceProduct,
+  PRODUCT_META_SPEC_KEY,
   ProductQuestion,
+  deriveProductMeta,
+  formatInstallmentText,
   money,
 } from '../data/marketplaceCatalog';
 import { getProductCatalogReviews } from '../data/productReviews';
+import { trackMetaViewContent } from '../lib/metaPixel';
 import { applyProductSeo } from '../lib/seo';
 import {
   PersistedQuestion,
@@ -186,6 +190,7 @@ export function ProductDetailPage({
   const hasDiscount = product.old > product.price;
   const discount = hasDiscount ? Math.round((1 - product.price / product.old) * 100) : 0;
   const isFav = favorites.has(product.id);
+  const meta = useMemo(() => deriveProductMeta(product), [product]);
 
   const relatedProducts = allProducts
     .filter((item) => item.id !== product.id && item.cat === product.cat)
@@ -198,6 +203,12 @@ export function ProductDetailPage({
       storeSettings,
       reviews: productReviews,
       questions: productQuestions,
+    });
+    trackMetaViewContent({
+      id: product.id,
+      name: product.name,
+      cat: product.cat,
+      price: product.price,
     });
   }, [product, storeSettings, persistedReviews, persistedQuestions]);
 
@@ -459,6 +470,8 @@ export function ProductDetailPage({
                   <img
                     src={photoUrl}
                     alt={`${product.name} miniatura ${idx + 1}`}
+                    loading="lazy"
+                    decoding="async"
                     referrerPolicy="no-referrer"
                   />
                 </button>
@@ -466,10 +479,9 @@ export function ProductDetailPage({
             </div>
           )}
 
-          {/* Termômetro de Reputação estilo Mercado Livre */}
           <div className="pdp-reputation-card">
             <div className="pdp-rep-top">
-              <span className="pdp-rep-medal">🏆 MercadoLíder Verificado</span>
+              <span className="pdp-rep-medal">✓ {storeSettings.storeName} Verificada</span>
               <span className="pdp-rep-sales">+{product.sold} vendidos</span>
             </div>
             <div className="pdp-rep-bars" aria-hidden="true">
@@ -481,16 +493,16 @@ export function ProductDetailPage({
             </div>
             <div className="pdp-rep-metrics">
               <div>
-                <b>99,4%</b>
-                <small>Entregas no prazo</small>
+                <b>{product.warranty.split(' ')[0]} {product.warranty.split(' ')[1]}</b>
+                <small>Garantia técnica</small>
               </div>
               <div>
-                <b>Excelente</b>
-                <small>Bom atendimento</small>
+                <b>Direto</b>
+                <small>Suporte WhatsApp</small>
               </div>
               <div>
-                <b>Garantia</b>
-                <small>Compra Protegida</small>
+                <b>7 dias</b>
+                <small>Devolução CDC</small>
               </div>
             </div>
           </div>
@@ -500,7 +512,7 @@ export function ProductDetailPage({
         <div className="pdp-info">
           <div className="pdp-meta">
             <span className="pdp-condition-badge">{product.condition}</span>
-            <span className="pdp-cat-tag">{product.cat}</span>
+            <span className="pdp-cat-tag">{meta.subCategory}</span>
             <span className="pdp-stock-pill">✓ Estoque disponível ({product.stock} un.)</span>
           </div>
 
@@ -508,7 +520,7 @@ export function ProductDetailPage({
 
           <div className="pdp-rating">
             ★ {reviewStats.avg}{' '}
-            <span>({reviewStats.total} opiniões verificadas • +{product.sold} vendas)</span>
+            <span>({reviewStats.total} avaliações • +{product.sold} vendas)</span>
           </div>
 
           <div className="pdp-price-box">
@@ -518,8 +530,8 @@ export function ProductDetailPage({
               {hasDiscount && <span className="pdp-discount-pill">{discount}% OFF</span>}
             </div>
             <div className="pdp-pix-line">
-              <b>{money(product.price)}</b> à vista no{' '}
-              <strong>PIX • Aprovação imediata</strong>
+              <b>{money(product.price)}</b> à vista no <strong>PIX</strong> · Parcelamento:{' '}
+              <strong>{formatInstallmentText(product.price, meta.installmentsMax)}</strong>
             </div>
           </div>
 
@@ -665,23 +677,57 @@ export function ProductDetailPage({
 
       {/* Descrição e Especificações */}
       <div className="pdp-desc-card">
-        <h2>Descrição e características do produto</h2>
+        <h2>Descrição e características técnicas</h2>
         <p>{product.desc}</p>
         <div className="pdp-specs">
           <div className="pdp-spec">
+            <small>Marca / Linha</small>
+            <b>{meta.brand}</b>
+          </div>
+          <div className="pdp-spec">
             <small>Categoria</small>
-            <b>{product.cat}</b>
+            <b>{meta.subCategory}</b>
+          </div>
+          <div className="pdp-spec">
+            <small>Armazenamento / Capacidade</small>
+            <b>{meta.storage}</b>
+          </div>
+          <div className="pdp-spec">
+            <small>Cor</small>
+            <b>{meta.color}</b>
+          </div>
+          {meta.division === 'mobile' && meta.batteryHealth !== 'N/A' && (
+            <div className="pdp-spec">
+              <small>Saúde da Bateria</small>
+              <b>{meta.batteryHealth}</b>
+            </div>
+          )}
+          {meta.gamesCount > 0 && (
+            <div className="pdp-spec">
+              <small>Jogos Inclusos</small>
+              <b>{meta.gamesCount} jogos</b>
+            </div>
+          )}
+          <div className="pdp-spec">
+            <small>Itens &amp; Acessórios Inclusos</small>
+            <b>{meta.accessoriesIncluded}</b>
+          </div>
+          <div className="pdp-spec">
+            <small>Nota Fiscal</small>
+            <b>{meta.nfeIncluded ? 'Disponível quando aplicável' : 'Recibo comercial'}</b>
           </div>
           <div className="pdp-spec">
             <small>Condição</small>
             <b>{product.condition}</b>
           </div>
           <div className="pdp-spec">
-            <small>Garantia</small>
+            <small>Garantia Real</small>
             <b>{product.warranty}</b>
           </div>
           {product.specs
-            .filter((spec) => spec.label !== CHECKOUT_URL_SPEC_KEY)
+            .filter(
+              (spec) => spec.label !== CHECKOUT_URL_SPEC_KEY && spec.label !== PRODUCT_META_SPEC_KEY
+            )
             .map((spec) => (
               <div className="pdp-spec" key={spec.label}>
                 <small>{spec.label}</small>
@@ -1015,7 +1061,13 @@ export function ProductDetailPage({
                     setActivePhotoIdx(i);
                   }}
                 >
-                  <img src={u} alt={`Miniatura ${i + 1}`} referrerPolicy="no-referrer" />
+                  <img
+                    src={u}
+                    alt={`Miniatura ${i + 1}`}
+                    loading="lazy"
+                    decoding="async"
+                    referrerPolicy="no-referrer"
+                  />
                 </button>
               ))}
             </div>

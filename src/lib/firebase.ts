@@ -3,49 +3,23 @@ import { GoogleAuthProvider, getAuth } from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
-export const ADMIN_EMAIL = 'lucasluft2025@gmail.com';
-export const ADMIN_EMAILS = [
-  'brasilgames@gmail.com',
-  'lucasluft2025@gmail.com',
-  'luft446@gmail.com',
-];
-export const PRIMARY_ADMIN_LOGIN_EMAIL = 'brasilgames@gmail.com';
-
-const ADMIN_SESSION_SALT = 'BT_OWNER_GUARD_2026_V2';
-
-function computeOwnerSessionDigest(email: string, keySecret: string): string {
-  const input = `${ADMIN_SESSION_SALT}::${email.trim().toLowerCase()}::${keySecret}`;
-  let h1 = 0x811c9dc5;
-  let h2 = 0x9e3779b9;
-  for (let i = 0; i < input.length; i += 1) {
-    const code = input.charCodeAt(i);
-    h1 ^= code;
-    h1 = Math.imul(h1, 16777619) >>> 0;
-    h2 = (Math.imul(h2 ^ code, 2246822519) + i) >>> 0;
-  }
-  return `btadm_${h1.toString(36)}_${h2.toString(36)}`;
-}
-
-const EXPECTED_PASSWORD_SESSION_TOKEN = computeOwnerSessionDigest(
+import {
+  ADMIN_EMAILS,
   PRIMARY_ADMIN_LOGIN_EMAIL,
-  'Adriana2026'
-);
+  createVerifiedAdminSessionToken,
+  isBootstrappedAdminEmail,
+  isValidAdminSessionToken,
+  validateAdminPasswordLogin,
+} from './adminSession';
 
-export function validateAdminPasswordLogin(email: string, password: string): boolean {
-  return (
-    email.trim().toLowerCase() === PRIMARY_ADMIN_LOGIN_EMAIL &&
-    password === 'Adriana2026'
-  );
-}
-
-export function createVerifiedAdminSessionToken(email: string, password: string): string | null {
-  if (!validateAdminPasswordLogin(email, password)) return null;
-  return EXPECTED_PASSWORD_SESSION_TOKEN;
-}
-
-export function isValidAdminSessionToken(token: string | null | undefined): boolean {
-  return Boolean(token && token === EXPECTED_PASSWORD_SESSION_TOKEN);
-}
+export const ADMIN_EMAIL = 'lucasluft2025@gmail.com';
+export {
+  ADMIN_EMAILS,
+  PRIMARY_ADMIN_LOGIN_EMAIL,
+  createVerifiedAdminSessionToken,
+  isValidAdminSessionToken,
+  validateAdminPasswordLogin,
+};
 
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
@@ -111,9 +85,7 @@ export function isBootstrappedAdminUser(
   email?: string | null,
   emailVerified?: boolean | null
 ): boolean {
-  return Boolean(
-    email && ADMIN_EMAILS.includes(email.toLowerCase()) && emailVerified === true
-  );
+  return isBootstrappedAdminEmail(email, emailVerified);
 }
 
 let connectionTested = false;

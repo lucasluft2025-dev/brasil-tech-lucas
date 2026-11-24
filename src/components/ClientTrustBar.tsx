@@ -167,6 +167,8 @@ export function ClientTrustBar({
                 <img
                   src={ord.productImage}
                   alt={ord.productName}
+                  loading="lazy"
+                  decoding="async"
                   referrerPolicy="no-referrer"
                 />
                 <div className="client-trust-card-info">

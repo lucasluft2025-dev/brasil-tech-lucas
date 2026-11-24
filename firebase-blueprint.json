@@ -231,6 +231,8 @@
         "expressShippingPrice": { "type": "number" },
         "standardShippingPrice": { "type": "number" },
         "pixDiscountPercent": { "type": "number" },
+        "metaPixelId": { "type": "string", "maxLength": 40 },
+        "installmentsMax": { "type": "number" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": [
@@ -245,6 +247,43 @@
         "pixDiscountPercent",
         "updatedAt"
       ]
+    },
+    "BannerItem": {
+      "title": "BannerItem",
+      "description": "Editable storefront hero or secondary promotional banner managed by administrators.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "slot": { "type": "string", "enum": ["hero", "secondary"] },
+        "badge": { "type": "string", "maxLength": 80 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "subtitle": { "type": "string", "maxLength": 320 },
+        "ctaLabel": { "type": "string", "maxLength": 60 },
+        "targetDivision": { "type": "string", "maxLength": 60 },
+        "targetCategory": { "type": "string", "maxLength": 60 },
+        "image": { "type": "string", "maxLength": 500 },
+        "order": { "type": "number" },
+        "active": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "slot", "title", "targetDivision", "order", "active", "updatedAt"]
+    },
+    "CategoryItem": {
+      "title": "CategoryItem",
+      "description": "Editable storefront category entry managed by administrators.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "division": { "type": "string", "enum": ["mobile", "gamer", "all"] },
+        "description": { "type": "string", "maxLength": 200 },
+        "image": { "type": "string", "maxLength": 500 },
+        "order": { "type": "number" },
+        "active": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "slug", "division", "order", "active", "updatedAt"]
     },
     "TrackingRecord": {
       "title": "TrackingRecord",
@@ -352,6 +391,14 @@
     "/trackings/{trackingId}/private/{detailId}": {
       "schema": { "$ref": "#/entities/TrackingPrivateDetails" },
       "description": "Recipient PII isolated strictly to verified administrators."
+    },
+    "/banners/{bannerId}": {
+      "schema": { "$ref": "#/entities/BannerItem" },
+      "description": "Publicly readable promotional banners edited by administrators."
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/CategoryItem" },
+      "description": "Publicly readable store categories managed by administrators."
     }
   }
 }
