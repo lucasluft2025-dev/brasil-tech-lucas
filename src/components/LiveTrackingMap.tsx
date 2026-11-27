@@ -8,6 +8,7 @@ import {
   projectLatLngToSvg,
   resolveBrazilLocationSync,
 } from '../services/brazilGeo';
+import { TRACKING_STAGE_LABELS } from '../services/firestoreStore';
 
 interface LiveTrackingMapProps {
   originCityState: string;
@@ -46,13 +47,7 @@ const BRAZIL_HUBS: Array<{ label: string; lat: number; lng: number }> = [
   { label: 'PORTO ALEGRE', lat: -30.03, lng: -51.21 },
 ];
 
-const ROUTE_MILESTONES = [
-  'Confirmado',
-  'Preparação',
-  'Em Trânsito',
-  'Saiu p/ Entrega',
-  'Entregue',
-];
+const ROUTE_MILESTONES = [...TRACKING_STAGE_LABELS];
 
 export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
   originCityState,
@@ -201,35 +196,35 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
     }> = [
       {
         step: 0,
-        title: 'Objeto postado e conferência de lacre concluída',
-        place: `Centro de Distribuição · ${origin}`,
+        title: 'Pedido criado e registrado na central',
+        place: `Central de Pedidos Brasil Tech · ${origin}`,
         time: tsCreate,
         current: statusStep === 0,
       },
       {
         step: 1,
-        title: 'Nota Fiscal Eletrônica (DANFE) e Etiqueta emitidas',
-        place: `Unidade Fiscal · ${origin}`,
+        title: 'Pedido em andamento — conferência técnica, NF-e (DANFE) e lacre',
+        place: `Unidade de Expedição & Fiscal · ${origin}`,
         time: statusStep === 1 ? tsUpdate : tsCreate,
         current: statusStep === 1,
       },
       {
         step: 2,
-        title: 'Objeto em transferência rodoviária/aérea para unidade de destino',
-        place: statusStep === 2 ? curr : `Em rota · ${origin} ➔ ${dest}`,
+        title: 'Pedido em logística — em transferência para a base de destino',
+        place: statusStep === 2 ? curr : `Em rota rodoviária/aérea · ${origin} ➔ ${dest}`,
         time: tsUpdate,
         current: statusStep === 2,
       },
       {
         step: 3,
-        title: 'Objeto saiu para entrega ao destinatário',
-        place: statusStep === 3 ? curr : `Base Regional · ${dest}`,
+        title: 'Saiu para entrega ao destinatário',
+        place: statusStep === 3 ? curr : `Base de Distribuição Local · ${dest}`,
         time: tsUpdate,
         current: statusStep === 3,
       },
       {
         step: 4,
-        title: 'Objeto entregue ao destinatário com protocolo assinado',
+        title: 'Entregue ao destinatário com protocolo assinado',
         place: `Entregue em ${dest}`,
         time: tsUpdate,
         current: statusStep === 4,
@@ -289,18 +284,18 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
         >
           <defs>
             <linearGradient id="btMapBg" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stopColor="#071021" />
-              <stop offset="55%" stopColor="#0C172C" />
-              <stop offset="100%" stopColor="#091120" />
+              <stop offset="0%" stopColor="#090D16" />
+              <stop offset="55%" stopColor="#0F172A" />
+              <stop offset="100%" stopColor="#0B1120" />
             </linearGradient>
             <radialGradient id="btMapGlow" cx="55%" cy="55%" r="55%">
-              <stop offset="0%" stopColor="#1D4ED8" stopOpacity="0.16" />
-              <stop offset="100%" stopColor="#071021" stopOpacity="0" />
+              <stop offset="0%" stopColor="#84CC16" stopOpacity="0.14" />
+              <stop offset="100%" stopColor="#090D16" stopOpacity="0" />
             </radialGradient>
             <linearGradient id="btRouteDone" x1="0" y1="0" x2="1" y2="0">
-              <stop offset="0%" stopColor="#38BDF8" />
-              <stop offset="55%" stopColor="#10B981" />
-              <stop offset="100%" stopColor="#22C55E" />
+              <stop offset="0%" stopColor="#84CC16" />
+              <stop offset="55%" stopColor="#22C55E" />
+              <stop offset="100%" stopColor="#10B981" />
             </linearGradient>
             <filter id="btGlow" x="-40%" y="-40%" width="180%" height="180%">
               <feGaussianBlur stdDeviation="3.8" result="blur" />

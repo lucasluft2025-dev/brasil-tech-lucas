@@ -1,138 +1,19 @@
 import React, { useMemo, useState } from 'react';
 import { PersistedTracking, StoreSettings } from '../services/firestoreStore';
+import {
+  buildCode128Bars,
+  buildQrModules,
+  computeTrackingDocumentMeta,
+  downloadDanfePdf,
+  downloadShippingLabelPdf,
+} from '../lib/trackingPdfGenerator';
 
 interface TrackingDocumentsModalProps {
   tracking: PersistedTracking;
   storeSettings: StoreSettings;
   initialTab?: 'nfe' | 'label';
   onClose: () => void;
-}
-
-function buildCode128Bars(seed: string, barCount = 68, maxW = 240): Array<{ x: number; w: number }> {
-  const bars: Array<{ x: number; w: number }> = [];
-  let hash = 2166136261;
-  for (let i = 0; i < seed.length; i += 1) {
-    hash ^= seed.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-
-  const rawUnits: Array<{ w: number; gap: number }> = [];
-  let totalUnits = 0;
-  for (let i = 0; i < barCount; i += 1) {
-    hash ^= (i + 1) * 374761393;
-    hash = Math.imul(hash, 668265263);
-    const w = ((Math.abs(hash) % 3) + 1) * 1.1;
-    const gap = ((Math.abs(hash >> 4) % 3) + 1) * 0.95;
-    rawUnits.push({ w, gap });
-    totalUnits += w + gap;
-  }
-
-  const usableWidth = maxW - 12;
-  const scale = usableWidth / Math.max(1, totalUnits);
-  let cursor = 6;
-  for (const unit of rawUnits) {
-    const bw = Math.max(0.9, unit.w * scale);
-    bars.push({ x: Number(cursor.toFixed(2)), w: Number(bw.toFixed(2)) });
-    cursor += (unit.w + unit.gap) * scale;
-  }
-  return bars;
-}
-
-function buildQrModules(seed: string, size = 21): boolean[][] {
-  const grid: boolean[][] = Array.from({ length: size }, () => Array(size).fill(false));
-  const markFinder = (ox: number, oy: number) => {
-    for (let y = 0; y < 7; y += 1) {
-      for (let x = 0; x < 7; x += 1) {
-        const outer = x === 0 || x === 6 || y === 0 || y === 6;
-        const inner = x >= 2 && x <= 4 && y >= 2 && y <= 4;
-        grid[oy + y][ox + x] = outer || inner;
-      }
-    }
-  };
-  markFinder(0, 0);
-  markFinder(size - 7, 0);
-  markFinder(0, size - 7);
-
-  // Timing strips
-  for (let i = 8; i < size - 8; i += 1) {
-    grid[6][i] = i % 2 === 0;
-    grid[i][6] = i % 2 === 0;
-  }
-
-  let h = 2166136261;
-  for (let i = 0; i < seed.length; i += 1) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const inFinder =
-        (x < 8 && y < 8) ||
-        (x >= size - 8 && y < 8) ||
-        (x < 8 && y >= size - 8);
-      if (inFinder || x === 6 || y === 6) continue;
-      h = (Math.imul(h, 1664525) + 1013904223) >>> 0;
-      grid[y][x] = (h & 3) === 0 || (h & 7) === 3;
-    }
-  }
-  return grid;
-}
-
-function computeMod11Digit(digits43: string): string {
-  let weight = 2;
-  let sum = 0;
-  for (let i = digits43.length - 1; i >= 0; i -= 1) {
-    sum += Number(digits43[i]) * weight;
-    weight = weight === 9 ? 2 : weight + 1;
-  }
-  const mod = sum % 11;
-  const dv = mod === 0 || mod === 1 ? 0 : 11 - mod;
-  return String(dv);
-}
-
-function buildChaveAcesso(tracking: PersistedTracking, cnpjDigits: string): string {
-  const cleanCnpj = cnpjDigits.padStart(14, '0').slice(0, 14);
-  const nNF = (tracking.invoiceNumber.replace(/\D/g, '') || '001482').padStart(9, '0').slice(-9);
-  const numericSeed = `${tracking.code}${tracking.orderCode}`
-    .split('')
-    .map((c) => c.charCodeAt(0) % 10)
-    .join('');
-  const cNF = `${numericSeed}98451234`.slice(0, 8);
-  const body43 = `412611${cleanCnpj}55001${nNF}1${cNF}`.slice(0, 43).padEnd(43, '7');
-  const full44 = `${body43}${computeMod11Digit(body43)}`;
-  return full44.replace(/(.{4})/g, '$1 ').trim();
-}
-
-function resolveProductNcm(summary: string): string {
-  const lower = summary.toLowerCase();
-  if (lower.includes('iphone') || lower.includes('celular') || lower.includes('smartphone')) {
-    return '8517.13.00';
-  }
-  if (lower.includes('pc gamer') || lower.includes('ryzen') || lower.includes('intel')) {
-    return '8471.50.10';
-  }
-  if (lower.includes('controle')) {
-    return '9504.50.00';
-  }
-  return '9504.50.00';
-}
-
-function extractCityAndUf(raw: string): { city: string; uf: string } {
-  const parts = raw.split(/\s*[-/]\s*/).filter(Boolean);
-  if (parts.length >= 2) {
-    const maybeUf = parts[parts.length - 1].toUpperCase().slice(0, 2);
-    const city = parts.slice(0, -1).join(' - ').trim();
-    return { city: city || raw, uf: maybeUf || 'PR' };
-  }
-  return { city: raw || 'Curitiba', uf: 'PR' };
-}
-
-function buildProtocolNumber(tracking: PersistedTracking): string {
-  const seedDigits = `${tracking.code}${tracking.invoiceNumber}`
-    .split('')
-    .map((c) => c.charCodeAt(0) % 10)
-    .join('');
-  return `14126${(`${seedDigits}0089451203`).slice(0, 10)}`;
+  onNotify?: (msg: string) => void;
 }
 
 export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
@@ -140,15 +21,16 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
   storeSettings,
   initialTab = 'nfe',
   onClose,
+  onNotify,
 }) => {
   const [tab, setTab] = useState<'nfe' | 'label'>(initialTab);
+  const [downloadStatus, setDownloadStatus] = useState<string>('');
 
-  const cnpjDigits = useMemo(() => storeSettings.cnpj.replace(/\D/g, ''), [storeSettings.cnpj]);
-  const chaveAcesso = useMemo(
-    () => buildChaveAcesso(tracking, cnpjDigits),
-    [tracking, cnpjDigits]
+  const meta = useMemo(
+    () => computeTrackingDocumentMeta(tracking, storeSettings),
+    [tracking, storeSettings]
   );
-  const protocolNumber = useMemo(() => buildProtocolNumber(tracking), [tracking]);
+
   const mainBarcode = useMemo(
     () => buildCode128Bars(`${tracking.code}-${tracking.invoiceNumber}`, 72, 240),
     [tracking.code, tracking.invoiceNumber]
@@ -162,35 +44,69 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
     [tracking.code, tracking.invoiceNumber, tracking.orderCode]
   );
 
-  const numericTotal = tracking.orderTotal > 0 ? tracking.orderTotal : 0;
-  const formatBrl = (val: number) =>
-    val.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-  const formatDecimal = (val: number) =>
-    val.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const {
+    chaveAcesso,
+    protocolNumber,
+    totalFormatted,
+    freightValue,
+    productsSubtotal,
+    weightKg,
+    netWeightKg,
+    recipientCpf,
+    recipientPhone,
+    recipientCep,
+    recipientAddress,
+    originText,
+    destText,
+    originParsed,
+    destParsed,
+    cfopCode,
+    invoiceFormatted,
+    issueDateStr,
+    issueTimeStr,
+    ncmCode,
+    formatDecimal,
+  } = meta;
 
-  const totalFormatted = formatBrl(numericTotal);
-  const isExpress = (tracking.shippingLabel || '').toLowerCase().includes('express');
-  const freightValue = numericTotal > 0 ? (isExpress ? 30 : 15) : 0;
-  const productsSubtotal = Math.max(0, numericTotal - freightValue);
-  const weightKg = Number(tracking.weightKg || 1.2);
-  const netWeightKg = Math.max(0.1, Number((weightKg * 0.88).toFixed(2)));
+  const handleDownloadCurrentPdf = () => {
+    try {
+      const file =
+        tab === 'nfe'
+          ? downloadDanfePdf(tracking, storeSettings)
+          : downloadShippingLabelPdf(tracking, storeSettings);
+      const msg = `PDF baixado: ${file}`;
+      setDownloadStatus(msg);
+      onNotify?.(msg);
+    } catch {
+      const errMsg = 'Não foi possível gerar o PDF automaticamente. Tente Imprimir.';
+      setDownloadStatus(errMsg);
+      onNotify?.(errMsg);
+    }
+  };
 
-  const recipientCpf = tracking.customerCpf || tracking.maskedCpf || 'Consumidor Final';
-  const recipientPhone = tracking.customerPhone || 'Não informado';
-  const recipientCep = tracking.customerCep || '00000-000';
-  const recipientAddress =
-    tracking.customerAddress || `${tracking.destinationCityState || tracking.cityState}`;
-  const originText = tracking.originCityState || 'Curitiba - PR';
-  const destText = tracking.destinationCityState || tracking.cityState || 'São Paulo - SP';
-  const originParsed = extractCityAndUf(originText);
-  const destParsed = extractCityAndUf(destText);
-  const cfopCode = originParsed.uf === destParsed.uf ? '5.102' : '6.102';
-  const invoicePadded = (tracking.invoiceNumber.replace(/\D/g, '') || '001482').padStart(9, '0');
-  const invoiceFormatted = `${invoicePadded.slice(0, 3)}.${invoicePadded.slice(3, 6)}.${invoicePadded.slice(6, 9)}`;
-  const issueDateStr = (tracking.createdAtLabel || new Date().toLocaleDateString('pt-BR')).split(',')[0];
-  const issueTimeStr =
-    (tracking.createdAtLabel || '').split(',')[1]?.trim().slice(0, 5) || '14:30';
-  const ncmCode = resolveProductNcm(tracking.productSummary);
+  const handleDownloadBothPdfs = () => {
+    try {
+      const f1 = downloadDanfePdf(tracking, storeSettings);
+      window.setTimeout(() => {
+        downloadShippingLabelPdf(tracking, storeSettings);
+      }, 250);
+      const msg = `Baixando NF-e (${f1}) e Etiqueta em PDF!`;
+      setDownloadStatus(msg);
+      onNotify?.(msg);
+    } catch {
+      const errMsg = 'Não foi possível baixar os PDFs.';
+      setDownloadStatus(errMsg);
+      onNotify?.(errMsg);
+    }
+  };
+
+  const handleSafePrint = () => {
+    try {
+      window.print();
+    } catch {
+      onNotify?.('Impressão bloqueada no navegador embutido. Use "Baixar PDF"!');
+    }
+  };
 
   return (
     <div className="modal-backdrop doc-modal-backdrop" onClick={onClose}>
@@ -219,42 +135,62 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
             <button
               type="button"
               className="btn-primary btn-sm"
-              onClick={() => window.print()}
+              onClick={handleDownloadCurrentPdf}
             >
-              Imprimir / Salvar PDF
+              {tab === 'nfe' ? 'Baixar NF-e (PDF)' : 'Baixar Etiqueta (PDF)'}
             </button>
-            <button type="button" className="btn-outline btn-sm" onClick={onClose}>
+            <button
+              type="button"
+              className="btn-outline btn-sm doc-btn-light"
+              onClick={handleDownloadBothPdfs}
+            >
+              Baixar Ambos PDFs
+            </button>
+            <button
+              type="button"
+              className="btn-outline btn-sm doc-btn-light"
+              onClick={handleSafePrint}
+            >
+              Imprimir
+            </button>
+            <button type="button" className="btn-outline btn-sm doc-btn-light" onClick={onClose}>
               Fechar ✕
             </button>
           </div>
+          {downloadStatus && (
+            <div className="w-full text-xs font-semibold text-emerald-300 pt-1">
+              ✓ {downloadStatus}
+            </div>
+          )}
         </div>
 
         <div className="printable-doc-area">
           {tab === 'nfe' ? (
-            <div className="danfe-sheet" aria-label="DANFE - Documento Auxiliar da Nota Fiscal Eletrônica">
-              {/* Canhoto de Recebimento */}
-              <div className="danfe-canhoto">
-                <div className="danfe-canhoto-left">
-                  <div className="danfe-canhoto-declaration">
-                    RECEBEMOS DE <strong>{storeSettings.storeName.toUpperCase()} COMÉRCIO DE ELETRÔNICOS LTDA</strong> OS PRODUTOS E/OU SERVIÇOS CONSTANTES DA NOTA FISCAL ELETRÔNICA INDICADA ABAIXO. EMISSÃO: {issueDateStr} — VALOR TOTAL: {totalFormatted} — DESTINATÁRIO: {tracking.customerLabel || 'CONSUMIDOR FINAL'}
+            <div className="danfe-scroll-wrap">
+              <div className="danfe-sheet" aria-label="DANFE - Documento Auxiliar da Nota Fiscal Eletrônica">
+                {/* Canhoto de Recebimento */}
+                <div className="danfe-canhoto">
+                  <div className="danfe-canhoto-left">
+                    <div className="danfe-canhoto-declaration">
+                      RECEBEMOS DE <strong>{storeSettings.storeName.toUpperCase()} COMÉRCIO DE ELETRÔNICOS LTDA</strong> OS PRODUTOS E/OU SERVIÇOS CONSTANTES DA NOTA FISCAL ELETRÔNICA INDICADA ABAIXO. EMISSÃO: {issueDateStr} — VALOR TOTAL: {totalFormatted} — DESTINATÁRIO: {tracking.customerLabel || 'CONSUMIDOR FINAL'}
+                    </div>
+                    <div className="danfe-canhoto-sign-row">
+                      <div className="danfe-box-cell">
+                        <span className="danfe-field-lbl">DATA DE RECEBIMENTO</span>
+                        <span className="danfe-field-val">&nbsp;</span>
+                      </div>
+                      <div className="danfe-box-cell flex-2">
+                        <span className="danfe-field-lbl">IDENTIFICAÇÃO E ASSINATURA DO RECEBEDOR</span>
+                        <span className="danfe-field-val">&nbsp;</span>
+                      </div>
+                    </div>
                   </div>
-                  <div className="danfe-canhoto-sign-row">
-                    <div className="danfe-box-cell">
-                      <span className="danfe-field-lbl">DATA DE RECEBIMENTO</span>
-                      <span className="danfe-field-val">&nbsp;</span>
-                    </div>
-                    <div className="danfe-box-cell flex-2">
-                      <span className="danfe-field-lbl">IDENTIFICAÇÃO E ASSINATURA DO RECEBEDOR</span>
-                      <span className="danfe-field-val">&nbsp;</span>
-                    </div>
+                  <div className="danfe-canhoto-right">
+                    <strong>NF-e</strong>
+                    <span>Nº {invoiceFormatted}</span>
+                    <small>SÉRIE 001</small>
                   </div>
                 </div>
-                <div className="danfe-canhoto-right">
-                  <strong>NF-e</strong>
-                  <span>Nº {invoiceFormatted}</span>
-                  <small>SÉRIE 001</small>
-                </div>
-              </div>
 
               <div className="danfe-cut-line" aria-hidden="true" />
 
@@ -277,6 +213,9 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
                         CNPJ: {storeSettings.cnpj} • IE: 908.451.23-44
                       </div>
                     </div>
+                  </div>
+                  <div className="danfe-auth-pill">
+                    ✓ NF-e AUTORIZADA • AMBIENTE DE PRODUÇÃO SEFAZ
                   </div>
                 </div>
 
@@ -394,6 +333,27 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
                 <div className="danfe-box-cell">
                   <span className="danfe-field-lbl">HORA DA SAÍDA</span>
                   <strong className="danfe-field-val">{issueTimeStr}</strong>
+                </div>
+              </div>
+
+              {/* FATURA / PAGAMENTO */}
+              <div className="danfe-section-title">FATURA / DADOS DO PAGAMENTO</div>
+              <div className="danfe-grid-row cols-4-fatura">
+                <div className="danfe-box-cell">
+                  <span className="danfe-field-lbl">Nº FATURA / PEDIDO</span>
+                  <strong className="danfe-field-val">{tracking.orderCode || tracking.code}</strong>
+                </div>
+                <div className="danfe-box-cell">
+                  <span className="danfe-field-lbl">FORMA DE PAGAMENTO</span>
+                  <strong className="danfe-field-val">PIX / APROVAÇÃO CONFIRMADA</strong>
+                </div>
+                <div className="danfe-box-cell num">
+                  <span className="danfe-field-lbl">VALOR ORIGINAL</span>
+                  <strong className="danfe-field-val">{totalFormatted}</strong>
+                </div>
+                <div className="danfe-box-cell num danfe-cell-highlight">
+                  <span className="danfe-field-lbl">VALOR LÍQUIDO QUITADO</span>
+                  <strong className="danfe-field-val">{totalFormatted}</strong>
                 </div>
               </div>
 
@@ -528,6 +488,9 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
                     <td className="mono">BT-{tracking.code.slice(-4)}</td>
                     <td>
                       <strong>{tracking.productSummary}</strong>
+                      <div className="danfe-item-sub">
+                        Garantia {storeSettings.storeName} • Lacre conferido • Rastreio {tracking.code}
+                      </div>
                     </td>
                     <td className="mono">{ncmCode}</td>
                     <td className="mono">0102</td>
@@ -546,7 +509,7 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
 
               {/* DADOS ADICIONAIS */}
               <div className="danfe-section-title">DADOS ADICIONAIS</div>
-              <div className="danfe-additional-grid">
+              <div className="danfe-additional-grid with-qr">
                 <div className="danfe-box-cell">
                   <span className="danfe-field-lbl">INFORMAÇÕES COMPLEMENTARES</span>
                   <p className="danfe-additional-text">
@@ -561,10 +524,25 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
                 <div className="danfe-box-cell">
                   <span className="danfe-field-lbl">RESERVADO AO FISCO</span>
                   <p className="danfe-additional-text">
-                    NF-e autorizada via SEFAZ-PR. Protocolo {protocolNumber}.
+                    NF-e autorizada via SEFAZ-PR.
+                    <br />
+                    Protocolo: <strong>{protocolNumber}</strong>
+                    <br />
+                    SAC: {storeSettings.phone}
                   </p>
                 </div>
+                <div className="danfe-box-cell danfe-qr-cell">
+                  <svg viewBox="0 0 21 21" className="danfe-qr-svg" aria-label="QR Code NF-e">
+                    {qrModules.map((row, y) =>
+                      row.map((on, x) =>
+                        on ? <rect key={`${x}-${y}`} x={x} y={y} width="1" height="1" fill="#0f172a" /> : null
+                      )
+                    )}
+                  </svg>
+                  <span className="danfe-field-lbl">AUTENTICIDADE NF-e</span>
+                </div>
               </div>
+            </div>
             </div>
           ) : (
             <div className="shipping-label-sheet" aria-label="Etiqueta Oficial de Envio">
@@ -572,7 +550,8 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
               <div className="label-top-band">
                 <div className="label-carrier-brand">
                   <div className="label-carrier-badges">
-                    <span className="label-carrier-tag">SEDEX / EXPRESSO</span>
+                    <span className="label-carrier-tag">SEDEX EXPRESSO</span>
+                    <span className="label-priority-tag">PRIORITÁRIO</span>
                     <span className="label-contract-tag">CONTRATO 9912487201</span>
                   </div>
                   <strong>{storeSettings.storeName.toUpperCase()} LOGÍSTICA</strong>
@@ -592,20 +571,31 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
 
               <div className="label-meta-strip">
                 <div>
-                  <span>NF-e:</span> <strong>{invoiceFormatted}</strong>
+                  <span>NF-e</span>
+                  <strong>{invoiceFormatted}</strong>
                 </div>
                 <div>
-                  <span>Pedido:</span> <strong>{tracking.orderCode || tracking.code}</strong>
+                  <span>Pedido</span>
+                  <strong>{tracking.orderCode || tracking.code}</strong>
                 </div>
                 <div>
-                  <span>Peso:</span> <strong>{weightKg.toFixed(2)} kg</strong>
+                  <span>Peso</span>
+                  <strong>{weightKg.toFixed(2)} kg</strong>
                 </div>
                 <div>
-                  <span>Volume:</span> <strong>1 / 1</strong>
+                  <span>Volume</span>
+                  <strong>1 / 1</strong>
                 </div>
               </div>
 
               <div className="label-barcode-hero">
+                <div className="label-tracking-top-row">
+                  <span className="label-barcode-kicker">OBJETO RASTREADO</span>
+                  <span className="label-hub-badge">
+                    {originParsed.uf}-{originParsed.city.slice(0, 3).toUpperCase()} ➔{' '}
+                    {destParsed.uf}-{destParsed.city.slice(0, 3).toUpperCase()}
+                  </span>
+                </div>
                 <div className="label-tracking-code">{tracking.code}</div>
                 <svg viewBox="0 0 240 48" className="label-main-barcode" aria-hidden="true">
                   {mainBarcode.map((b, i) => (
@@ -614,11 +604,11 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
                 </svg>
                 <div className="label-route-pill">
                   <span>
-                    TRIAGEM {originParsed.uf}-{originParsed.city.slice(0, 3).toUpperCase()}
+                    ORIGEM {originText.toUpperCase()}
                   </span>
                   <strong>➔</strong>
                   <span>
-                    DESTINO {destParsed.uf}-{destParsed.city.slice(0, 3).toUpperCase()}
+                    DESTINO {destText.toUpperCase()}
                   </span>
                 </div>
               </div>
@@ -649,7 +639,7 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
                       <rect key={i} x={b.x} y="1" width={b.w} height="22" fill="#0f172a" />
                     ))}
                   </svg>
-                  <span>CEP {recipientCep}</span>
+                  <span className="label-cep-pill">CEP {recipientCep}</span>
                 </div>
               </div>
 
@@ -657,9 +647,11 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
                 <div>
                   <strong>DECLARAÇÃO DE CONTEÚDO:</strong> {tracking.productSummary}
                 </div>
-                <div>
-                  <strong>VALOR SEGURADO:</strong> {totalFormatted} •{' '}
-                  <strong>LACRE DE SEGURANÇA CONFERIDO</strong>
+                <div className="label-insurance-row">
+                  <span>
+                    <strong>VALOR SEGURADO:</strong> {totalFormatted}
+                  </span>
+                  <span className="label-seal-chip">✓ LACRE DE SEGURANÇA</span>
                 </div>
               </div>
 
@@ -675,7 +667,7 @@ export const TrackingDocumentsModal: React.FC<TrackingDocumentsModalProps> = ({
               </div>
 
               <div className="label-sender-card">
-                <div className="label-sender-badge">REMETENTE</div>
+                <div className="label-sender-badge">REMETENTE • DESPACHO OFICIAL</div>
                 <strong>{storeSettings.storeName.toUpperCase()} COMÉRCIO DE ELETRÔNICOS LTDA</strong>{' '}
                 • CNPJ: {storeSettings.cnpj}
                 <div>

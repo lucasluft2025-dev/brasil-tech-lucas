@@ -660,16 +660,13 @@ export function ProductDetailPage({
               </span>
             </div>
             {onOpenSecurityPage && (
-              <div style={{ marginTop: 6 }}>
-                <span>✅</span>
-                <button
-                  type="button"
-                  className="pdp-security-link"
-                  onClick={onOpenSecurityPage}
-                >
-                  Ver política de garantia &amp; reembolso em 7 dias →
-                </button>
-              </div>
+              <button
+                type="button"
+                className="pdp-security-link"
+                onClick={onOpenSecurityPage}
+              >
+                ✅ Ver política de garantia &amp; reembolso em 7 dias →
+              </button>
             )}
           </div>
         </div>

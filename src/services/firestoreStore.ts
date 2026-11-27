@@ -266,6 +266,36 @@ function ensureStoreSyncHub(): void {
   }
 }
 
+async function readJsonApiResponse<T>(
+  res: Response
+): Promise<{ isJson: boolean; data: T | null }> {
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  if (!ct.includes('application/json')) {
+    return { isJson: false, data: null };
+  }
+  try {
+    const data = (await res.json()) as T;
+    return { isJson: true, data };
+  } catch {
+    return { isJson: false, data: null };
+  }
+}
+
+function getStaticHostingAuthMessage(actionLabel: string): string {
+  return `Este site está em hospedagem estática (Netlify) sem servidor Node (/api). Para ${actionLabel} na nuvem para todos os clientes, clique em "Conectar Google Admin (Firebase)" no topo do painel.`;
+}
+
+export async function probeBackendApiAvailable(): Promise<boolean> {
+  if (typeof window === 'undefined') return true;
+  try {
+    const res = await fetch('/api/store-data', { cache: 'no-store' });
+    const parsed = await readJsonApiResponse<ServerStoreDataShape>(res);
+    return res.ok && parsed.isJson;
+  } catch {
+    return false;
+  }
+}
+
 async function fetchPublicServerStoreData(force = false): Promise<ServerStoreDataShape> {
   if (!force && publicStoreCache) return publicStoreCache;
   if (!force && publicStorePromise) return publicStorePromise;
@@ -273,9 +303,11 @@ async function fetchPublicServerStoreData(force = false): Promise<ServerStoreDat
   publicStorePromise = (async () => {
     try {
       const res = await fetch('/api/store-data', { cache: 'no-store' });
-      if (!res.ok) return publicStoreCache || EMPTY_SERVER_DATA;
-      const data = (await res.json()) as ServerStoreDataShape;
-      publicStoreCache = { ...EMPTY_SERVER_DATA, ...data };
+      const parsed = await readJsonApiResponse<ServerStoreDataShape>(res);
+      if (!res.ok || !parsed.isJson || !parsed.data) {
+        return publicStoreCache || EMPTY_SERVER_DATA;
+      }
+      publicStoreCache = { ...EMPTY_SERVER_DATA, ...parsed.data };
       return publicStoreCache;
     } catch {
       return publicStoreCache || EMPTY_SERVER_DATA;
@@ -297,10 +329,12 @@ async function fetchAdminServerStoreData(force = false): Promise<ServerStoreData
       if (!headers['X-Admin-Session'] && !headers.Authorization) {
         return fetchPublicServerStoreData(force);
       }
-      const res = await fetch('/api/admin/store-data', { headers, cache: 'no-store' });
-      if (!res.ok) return fetchPublicServerStoreData(force);
-      const data = (await res.json()) as ServerStoreDataShape;
-      adminStoreCache = { ...EMPTY_SERVER_DATA, ...data };
+      const res = await fetchAdminWithAuthRetry('/api/admin/store-data', { cache: 'no-store' });
+      const parsed = await readJsonApiResponse<ServerStoreDataShape>(res);
+      if (!res.ok || !parsed.isJson || !parsed.data) {
+        return fetchPublicServerStoreData(force);
+      }
+      adminStoreCache = { ...EMPTY_SERVER_DATA, ...parsed.data };
       publicStoreCache = adminStoreCache;
       return adminStoreCache;
     } catch {
@@ -1134,27 +1168,41 @@ export async function saveProductAdmin(
     specs: mergedSpecs,
   };
 
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch('/api/admin/products', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
-    body: JSON.stringify({
-      product: cleanProduct,
-      costPrice: Math.max(0, Number(costPrice || 0)),
-    }),
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao publicar alterações do produto.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  try {
+    const res = await fetchAdminWithAuthRetry('/api/admin/products', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        product: cleanProduct,
+        costPrice: Math.max(0, Number(costPrice || 0)),
+      }),
+      cache: 'no-store',
+    });
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) {
+      apiOk = true;
+    } else if (parsed.data?.error) {
+      apiError = parsed.data.error;
+    }
+  } catch {
+    apiOk = false;
   }
-  broadcastStoreTopic('products', String(product.id));
 
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
+  let firestoreOk = false;
+  let firestoreError = '';
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
     const ref = doc(db, 'products', String(product.id));
     try {
-      const firestorePayload = {
-        id: cleanProduct.id,
+      const existingSnap = !isNew ? await getDoc(ref) : null;
+      const mutableFields = {
         name: cleanProduct.name,
         cat: cleanProduct.cat,
         emoji: cleanProduct.emoji,
@@ -1173,20 +1221,33 @@ export async function saveProductAdmin(
         specs: mergedSpecs,
         updatedAt: serverTimestamp(),
       };
-      if (isNew) {
-        await setDoc(ref, { ...firestorePayload, createdAt: serverTimestamp() });
+      if (isNew || !existingSnap?.exists() || !existingSnap.data()?.createdAt) {
+        await setDoc(ref, {
+          id: cleanProduct.id,
+          ...mutableFields,
+          createdAt: serverTimestamp(),
+        });
       } else {
-        await setDoc(ref, firestorePayload, { merge: true });
+        await updateDoc(ref, mutableFields);
       }
       await setDoc(doc(db, 'productCosts', String(product.id)), {
         productId: product.id,
         costPrice: Math.max(0, Number(costPrice || 0)),
         updatedAt: serverTimestamp(),
       });
-    } catch {
-      // Server store already published globally without errors
+      firestoreOk = true;
+    } catch (err) {
+      firestoreError = err instanceof Error ? err.message : '';
     }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('publicar produtos'));
+    }
+    throw new Error(apiError || firestoreError || 'Erro ao publicar alterações do produto.');
+  }
+  broadcastStoreTopic('products', String(product.id));
 }
 
 export async function adjustProductStockAdmin(
@@ -1195,52 +1256,101 @@ export async function adjustProductStockAdmin(
   productSnapshot?: MarketplaceProduct
 ): Promise<void> {
   const safeStock = Math.max(0, Math.round(nextStock));
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch(`/api/admin/products/${encodeURIComponent(String(productId))}/stock`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
-    body: JSON.stringify({ stock: safeStock, product: productSnapshot }),
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao atualizar estoque.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  try {
+    const res = await fetchAdminWithAuthRetry(
+      `/api/admin/products/${encodeURIComponent(String(productId))}/stock`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stock: safeStock, product: productSnapshot }),
+        cache: 'no-store',
+      }
+    );
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) {
+      apiOk = true;
+    } else if (parsed.data?.error) {
+      apiError = parsed.data.error;
+    }
+  } catch {
+    apiOk = false;
   }
-  broadcastStoreTopic('products', String(productId));
 
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
+  let firestoreOk = false;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
     try {
       await updateDoc(doc(db, 'products', String(productId)), {
         stock: safeStock,
         updatedAt: serverTimestamp(),
       });
+      firestoreOk = true;
     } catch {
       // ignore Firestore mirror failure
     }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('atualizar estoque'));
+    }
+    throw new Error(apiError || 'Erro ao atualizar estoque.');
+  }
+  broadcastStoreTopic('products', String(productId));
 }
 
 export async function deleteProductAdmin(productId: number): Promise<void> {
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch(`/api/admin/products/${encodeURIComponent(String(productId))}`, {
-    method: 'DELETE',
-    headers: authHeaders,
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao excluir produto.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  try {
+    const res = await fetchAdminWithAuthRetry(
+      `/api/admin/products/${encodeURIComponent(String(productId))}`,
+      {
+        method: 'DELETE',
+        cache: 'no-store',
+      }
+    );
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) {
+      apiOk = true;
+    } else if (parsed.data?.error) {
+      apiError = parsed.data.error;
+    }
+  } catch {
+    apiOk = false;
   }
-  broadcastStoreTopic('products', String(productId));
 
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
+  let firestoreOk = false;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
     try {
       await deleteDoc(doc(db, 'products', String(productId)));
       await deleteDoc(doc(db, 'productCosts', String(productId))).catch(() => undefined);
+      firestoreOk = true;
     } catch {
       // ignore Firestore mirror failure
     }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('excluir produtos'));
+    }
+    throw new Error(apiError || 'Erro ao excluir produto.');
+  }
+  broadcastStoreTopic('products', String(productId));
 }
 
 // --- Orders ---
@@ -1337,24 +1447,40 @@ export async function updateOrderAdmin(
     paymentStatus: 'pending' | 'paid' | 'refunded';
   }
 ): Promise<void> {
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch(`/api/admin/orders/${encodeURIComponent(orderCode)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
-    body: JSON.stringify({
-      statusStep: updates.statusStep,
-      trackingCode: updates.trackingCode.trim().slice(0, 60),
-      paymentStatus: updates.paymentStatus,
-    }),
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao atualizar pedido.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiErrorMessage = '';
+  try {
+    const res = await fetchAdminWithAuthRetry(
+      `/api/admin/orders/${encodeURIComponent(orderCode)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          statusStep: updates.statusStep,
+          trackingCode: updates.trackingCode.trim().slice(0, 60),
+          paymentStatus: updates.paymentStatus,
+        }),
+        cache: 'no-store',
+      }
+    );
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) {
+      apiOk = true;
+    } else if (parsed.data?.error) {
+      apiErrorMessage = parsed.data.error;
+    }
+  } catch {
+    apiOk = false;
   }
-  broadcastStoreTopic('orders', orderCode);
 
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
+  let firestoreOk = false;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
     try {
       await updateDoc(doc(db, 'orders', orderCode), {
         statusStep: updates.statusStep,
@@ -1362,77 +1488,133 @@ export async function updateOrderAdmin(
         paymentStatus: updates.paymentStatus,
         updatedAt: serverTimestamp(),
       });
+      firestoreOk = true;
     } catch {
       // ignore optional Firestore mirror failure
     }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('atualizar pedidos'));
+    }
+    throw new Error(apiErrorMessage || 'Erro ao atualizar pedido.');
+  }
+  broadcastStoreTopic('orders', orderCode);
 }
 
 // --- Coupons ---
 
 export async function saveCouponAdmin(coupon: PersistedCoupon, isNew: boolean): Promise<void> {
   const code = coupon.code.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 32);
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch('/api/admin/coupons', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
-    body: JSON.stringify({
-      code,
-      type: coupon.type,
-      value: Number(coupon.value),
-      label: coupon.label.trim().slice(0, 80),
-      active: coupon.active,
-    }),
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao salvar cupom.');
-  }
-  broadcastStoreTopic('coupons', code);
-
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
-    try {
-      const payload = {
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  try {
+    const res = await fetchAdminWithAuthRetry('/api/admin/coupons', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         code,
+        type: coupon.type,
+        value: Number(coupon.value),
+        label: coupon.label.trim().slice(0, 80),
+        active: coupon.active,
+      }),
+      cache: 'no-store',
+    });
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) {
+      apiOk = true;
+    } else if (parsed.data?.error) {
+      apiError = parsed.data.error;
+    }
+  } catch {
+    apiOk = false;
+  }
+
+  let firestoreOk = false;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
+    try {
+      const ref = doc(db, 'coupons', code);
+      const existingSnap = !isNew ? await getDoc(ref) : null;
+      const mutable = {
         type: coupon.type,
         value: Number(coupon.value),
         label: coupon.label.trim().slice(0, 80),
         active: coupon.active,
         updatedAt: serverTimestamp(),
       };
-      if (isNew) {
-        await setDoc(doc(db, 'coupons', code), { ...payload, createdAt: serverTimestamp() });
+      if (isNew || !existingSnap?.exists() || !existingSnap.data()?.createdAt) {
+        await setDoc(ref, { code, ...mutable, createdAt: serverTimestamp() });
       } else {
-        await setDoc(doc(db, 'coupons', code), payload, { merge: true });
+        await updateDoc(ref, mutable);
       }
+      firestoreOk = true;
     } catch {
       // ignore optional Firestore mirror failure
     }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('salvar cupons'));
+    }
+    throw new Error(apiError || 'Erro ao salvar cupom.');
+  }
+  broadcastStoreTopic('coupons', code);
 }
 
 export async function deleteCouponAdmin(code: string): Promise<void> {
   const cleanCode = code.trim().toUpperCase();
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch(`/api/admin/coupons/${encodeURIComponent(cleanCode)}`, {
-    method: 'DELETE',
-    headers: authHeaders,
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao excluir cupom.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  try {
+    const res = await fetchAdminWithAuthRetry(
+      `/api/admin/coupons/${encodeURIComponent(cleanCode)}`,
+      {
+        method: 'DELETE',
+        cache: 'no-store',
+      }
+    );
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) {
+      apiOk = true;
+    } else if (parsed.data?.error) {
+      apiError = parsed.data.error;
+    }
+  } catch {
+    apiOk = false;
   }
-  broadcastStoreTopic('coupons', cleanCode);
 
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
+  let firestoreOk = false;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
     try {
       await deleteDoc(doc(db, 'coupons', cleanCode));
+      firestoreOk = true;
     } catch {
       // ignore optional Firestore mirror failure
     }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('excluir cupons'));
+    }
+    throw new Error(apiError || 'Erro ao excluir cupom.');
+  }
+  broadcastStoreTopic('coupons', cleanCode);
 }
 
 // --- Reviews & Q&A ---
@@ -1521,20 +1703,33 @@ export async function createQuestionFirestore(
 export async function answerQuestionAdmin(docId: string, answer: string): Promise<void> {
   const cleanAnswer = answer.trim().slice(0, 1200);
   const dateLabel = `${new Date().toLocaleDateString('pt-BR')} • Brasil Tech Oficial`;
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch(`/api/admin/questions/${encodeURIComponent(docId)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
-    body: JSON.stringify({ answer: cleanAnswer, date: dateLabel }),
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao responder pergunta.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  try {
+    const res = await fetchAdminWithAuthRetry(
+      `/api/admin/questions/${encodeURIComponent(docId)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answer: cleanAnswer, date: dateLabel }),
+        cache: 'no-store',
+      }
+    );
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) apiOk = true;
+    else if (parsed.data?.error) apiError = parsed.data.error;
+  } catch {
+    apiOk = false;
   }
-  broadcastStoreTopic('questions', docId);
 
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
+  let firestoreOk = false;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
     try {
       await updateDoc(doc(db, 'questions', docId), {
         answer: cleanAnswer,
@@ -1542,132 +1737,230 @@ export async function answerQuestionAdmin(docId: string, answer: string): Promis
         date: dateLabel,
         updatedAt: serverTimestamp(),
       });
+      firestoreOk = true;
     } catch {
       // ignore optional Firestore mirror failure
     }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('responder perguntas'));
+    }
+    throw new Error(apiError || 'Erro ao responder pergunta.');
+  }
+  broadcastStoreTopic('questions', docId);
 }
 
 export async function deleteQuestionAdmin(docId: string): Promise<void> {
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch(`/api/admin/questions/${encodeURIComponent(docId)}`, {
-    method: 'DELETE',
-    headers: authHeaders,
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao remover pergunta.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  try {
+    const res = await fetchAdminWithAuthRetry(
+      `/api/admin/questions/${encodeURIComponent(docId)}`,
+      { method: 'DELETE', cache: 'no-store' }
+    );
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) apiOk = true;
+    else if (parsed.data?.error) apiError = parsed.data.error;
+  } catch {
+    apiOk = false;
   }
-  broadcastStoreTopic('questions', docId);
 
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
+  let firestoreOk = false;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
     try {
       await deleteDoc(doc(db, 'questions', docId));
+      firestoreOk = true;
     } catch {
       // ignore optional Firestore mirror failure
     }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('remover perguntas'));
+    }
+    throw new Error(apiError || 'Erro ao remover pergunta.');
+  }
+  broadcastStoreTopic('questions', docId);
 }
 
 export async function moderateReviewAdmin(
   docId: string,
   status: ReviewStatus
 ): Promise<void> {
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch(`/api/admin/reviews/${encodeURIComponent(docId)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
-    body: JSON.stringify({ status }),
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao moderar avaliação.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  try {
+    const res = await fetchAdminWithAuthRetry(
+      `/api/admin/reviews/${encodeURIComponent(docId)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+        cache: 'no-store',
+      }
+    );
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) apiOk = true;
+    else if (parsed.data?.error) apiError = parsed.data.error;
+  } catch {
+    apiOk = false;
   }
-  broadcastStoreTopic('reviews', docId);
 
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
+  let firestoreOk = false;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
     try {
       await updateDoc(doc(db, 'reviews', docId), {
         status,
         updatedAt: serverTimestamp(),
       });
+      firestoreOk = true;
     } catch {
       // ignore optional Firestore mirror failure
     }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('moderar avaliações'));
+    }
+    throw new Error(apiError || 'Erro ao moderar avaliação.');
+  }
+  broadcastStoreTopic('reviews', docId);
 }
 
 export async function deleteReviewAdmin(docId: string): Promise<void> {
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch(`/api/admin/reviews/${encodeURIComponent(docId)}`, {
-    method: 'DELETE',
-    headers: authHeaders,
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao excluir avaliação.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  try {
+    const res = await fetchAdminWithAuthRetry(
+      `/api/admin/reviews/${encodeURIComponent(docId)}`,
+      { method: 'DELETE', cache: 'no-store' }
+    );
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) apiOk = true;
+    else if (parsed.data?.error) apiError = parsed.data.error;
+  } catch {
+    apiOk = false;
   }
-  broadcastStoreTopic('reviews', docId);
 
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
+  let firestoreOk = false;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
     try {
       await deleteDoc(doc(db, 'reviews', docId));
+      firestoreOk = true;
     } catch {
       // ignore optional Firestore mirror failure
     }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('excluir avaliações'));
+    }
+    throw new Error(apiError || 'Erro ao excluir avaliação.');
+  }
+  broadcastStoreTopic('reviews', docId);
 }
 
 export async function deleteOrderAdmin(orderCode: string): Promise<void> {
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch(`/api/admin/orders/${encodeURIComponent(orderCode)}`, {
-    method: 'DELETE',
-    headers: authHeaders,
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao remover pedido.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  try {
+    const res = await fetchAdminWithAuthRetry(
+      `/api/admin/orders/${encodeURIComponent(orderCode)}`,
+      { method: 'DELETE', cache: 'no-store' }
+    );
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) apiOk = true;
+    else if (parsed.data?.error) apiError = parsed.data.error;
+  } catch {
+    apiOk = false;
   }
-  broadcastStoreTopic('orders', orderCode);
 
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
+  let firestoreOk = false;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
     try {
       await deleteDoc(doc(db, 'orders', orderCode));
+      firestoreOk = true;
     } catch {
       // ignore optional Firestore mirror failure
     }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('remover pedidos'));
+    }
+    throw new Error(apiError || 'Erro ao remover pedido.');
+  }
+  broadcastStoreTopic('orders', orderCode);
 }
 
 export async function deductOrderStockAdmin(
   items: OrderItem[],
   currentProducts: MarketplaceProduct[]
 ): Promise<number> {
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch('/api/admin/products/deduct-stock', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
-    body: JSON.stringify({
-      items,
-      productsSnapshot: currentProducts,
-    }),
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao baixar estoque.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  let apiUpdated = 0;
+  try {
+    const res = await fetchAdminWithAuthRetry('/api/admin/products/deduct-stock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items,
+        productsSnapshot: currentProducts,
+      }),
+      cache: 'no-store',
+    });
+    const parsed = await readJsonApiResponse<{ updated?: number; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) {
+      apiOk = true;
+      apiUpdated = Number(parsed.data?.updated || 0);
+    } else if (parsed.data?.error) {
+      apiError = parsed.data.error;
+    }
+  } catch {
+    apiOk = false;
   }
-  const json = (await res.json().catch(() => ({}))) as { updated?: number };
-  broadcastStoreTopic('products');
 
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
+  let firestoreUpdated = 0;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
     try {
       const batch = writeBatch(db);
-      let updated = 0;
       items.forEach((item) => {
         const prod = currentProducts.find((p) => p.id === item.id);
         if (!prod) return;
@@ -1676,17 +1969,24 @@ export async function deductOrderStockAdmin(
           sold: prod.sold + item.qty,
           updatedAt: serverTimestamp(),
         });
-        updated += 1;
+        firestoreUpdated += 1;
       });
-      if (updated > 0) {
+      if (firestoreUpdated > 0) {
         await batch.commit();
       }
     } catch {
-      // ignore optional Firestore mirror failure
+      firestoreUpdated = 0;
     }
   }
 
-  return Number(json.updated || 0);
+  if (!apiOk && firestoreUpdated === 0) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('baixar estoque'));
+    }
+    throw new Error(apiError || 'Erro ao baixar estoque.');
+  }
+  broadcastStoreTopic('products');
+  return apiOk ? apiUpdated : firestoreUpdated;
 }
 
 export async function subscribeNewsletterFirestore(user: User, email: string): Promise<void> {
@@ -1800,29 +2100,48 @@ export async function saveStoreSettingsAdmin(settings: StoreSettings): Promise<v
     pixDiscountPercent: Math.min(50, Math.max(0, Number(settings.pixDiscountPercent))),
   };
 
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch('/api/admin/store-settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
-    body: JSON.stringify(payload),
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao salvar configurações da loja.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  try {
+    const res = await fetchAdminWithAuthRetry('/api/admin/store-settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      cache: 'no-store',
+    });
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) apiOk = true;
+    else if (parsed.data?.error) apiError = parsed.data.error;
+  } catch {
+    apiOk = false;
   }
-  broadcastStoreTopic('store-settings');
 
-  if (isBootstrappedAdminUser(auth.currentUser?.email, auth.currentUser?.emailVerified)) {
+  let firestoreOk = false;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
     try {
       await setDoc(doc(db, 'storeSettings', 'public'), {
         ...payload,
         updatedAt: serverTimestamp(),
       });
+      firestoreOk = true;
     } catch {
       // ignore optional Firestore mirror failure
     }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('salvar configurações da loja'));
+    }
+    throw new Error(apiError || 'Erro ao salvar configurações da loja.');
+  }
+  broadcastStoreTopic('store-settings');
 }
 
 export function subscribeUsersAdmin(onData: (users: PersistedUser[]) => void): () => void {
@@ -1949,8 +2268,24 @@ export function normalizeWhatsAppDigits(rawPhone: string): string {
   return d.startsWith('55') && d.length >= 12 ? d : `55${d}`;
 }
 
+export const TRACKING_STAGE_LABELS = [
+  'Pedido criado',
+  'Pedido em andamento',
+  'Pedido em logística',
+  'Saiu para entrega',
+  'Entregue',
+] as const;
+
+export const TRACKING_STAGE_DESCRIPTIONS = [
+  'Pedido registrado e confirmado no sistema da loja.',
+  'Produto em conferência técnica, emissão de NF-e e embalagem lacrada.',
+  'Objeto coletado e em encaminhamento na rede logística.',
+  'Objeto na rota final de entrega para o endereço do destinatário.',
+  'Entrega concluída ao destinatário com comprovante assinado.',
+] as const;
+
 export function defaultProgressFromStep(step: number): number {
-  const map: Record<number, number> = { 0: 8, 1: 24, 2: 52, 3: 84, 4: 100 };
+  const map: Record<number, number> = { 0: 10, 1: 28, 2: 56, 3: 85, 4: 100 };
   return map[Math.min(4, Math.max(0, Math.round(step)))] ?? 10;
 }
 
@@ -1958,14 +2293,7 @@ export function buildTrackingWhatsAppMessage(
   tracking: PersistedTracking,
   storeName = 'Brasil Tech'
 ): string {
-  const stepLabels = [
-    'Pedido Confirmado',
-    'Em Preparação / NF-e Emitida',
-    'Enviado • Em Trânsito',
-    'Saiu para Entrega',
-    'Pedido Entregue',
-  ];
-  const stepText = stepLabels[tracking.statusStep] || 'Em atualização';
+  const stepText = TRACKING_STAGE_LABELS[tracking.statusStep] || 'Pedido em logística';
   const origin = tracking.originCityState || 'Curitiba - PR';
   const dest = tracking.destinationCityState || tracking.cityState || 'Destino';
   const current = tracking.currentLocation || origin;
@@ -1983,10 +2311,10 @@ export function buildTrackingWhatsAppMessage(
     `📱 *Produto:* ${tracking.productSummary}`,
     `📍 *Trajeto:* ${origin} ➔ ${dest}`,
     `🚚 *Localização Atual:* ${current} (${Math.round(tracking.routeProgress)}%)`,
-    `⚡ *Status:* ${stepText}`,
+    `⚡ *Etapa:* ${stepText}`,
     tracking.statusNote ? `💬 *Obs.:* ${tracking.statusNote}` : '',
     ``,
-    `🗺️ *Acompanhe o caminhão ao vivo no mapa:*`,
+    `🗺️ *Acompanhe o caminhão e todas as etapas ao vivo:*`,
     link,
   ]
     .filter(Boolean)
@@ -1995,21 +2323,91 @@ export function buildTrackingWhatsAppMessage(
 
 const ADMIN_SESSION_STORAGE_KEY = 'bt_admin_session_v2';
 
-async function getAdminAuthHeaders(): Promise<Record<string, string>> {
-  const headers: Record<string, string> = {};
-  if (typeof window !== 'undefined') {
-    try {
-      const token = window.sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
-      if (isValidAdminSessionToken(token) && token) {
-        headers['X-Admin-Session'] = token;
+export function readStoredAdminSessionToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const fromSession = window.sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
+    if (isValidAdminSessionToken(fromSession)) return fromSession;
+  } catch {
+    // ignore sessionStorage error
+  }
+  try {
+    const fromLocal = window.localStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
+    if (isValidAdminSessionToken(fromLocal)) return fromLocal;
+  } catch {
+    // ignore localStorage error
+  }
+  return null;
+}
+
+export function persistAdminSessionToken(token: string): void {
+  if (typeof window === 'undefined' || !isValidAdminSessionToken(token)) return;
+  try {
+    window.sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, token);
+  } catch {
+    // ignore
+  }
+  try {
+    window.localStorage.setItem(ADMIN_SESSION_STORAGE_KEY, token);
+  } catch {
+    // ignore
+  }
+}
+
+export function clearAdminSessionToken(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+  try {
+    window.localStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export async function exchangeFirebaseAdminSession(
+  forceRefresh = false
+): Promise<string | null> {
+  if (!auth.currentUser) return null;
+  try {
+    const idToken = await auth.currentUser.getIdToken(forceRefresh);
+    if (!idToken) return null;
+    const res = await fetch('/api/admin/auth/session', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({}),
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { sessionToken?: string };
+    if (data.sessionToken && isValidAdminSessionToken(data.sessionToken)) {
+      persistAdminSessionToken(data.sessionToken);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('bt-admin-session-ready'));
       }
-    } catch {
-      // ignore sessionStorage errors
+      return data.sessionToken;
     }
+  } catch {
+    // ignore exchange failure
+  }
+  return null;
+}
+
+async function getAdminAuthHeaders(forceRefreshToken = false): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {};
+  const sessionToken = readStoredAdminSessionToken();
+  if (sessionToken) {
+    headers['X-Admin-Session'] = sessionToken;
   }
   if (auth.currentUser) {
     try {
-      const idToken = await auth.currentUser.getIdToken();
+      const idToken = await auth.currentUser.getIdToken(forceRefreshToken);
       if (idToken) {
         headers.Authorization = `Bearer ${idToken}`;
       }
@@ -2018,6 +2416,35 @@ async function getAdminAuthHeaders(): Promise<Record<string, string>> {
     }
   }
   return headers;
+}
+
+async function fetchAdminWithAuthRetry(
+  url: string,
+  init: RequestInit = {}
+): Promise<Response> {
+  const initialHeaders = await getAdminAuthHeaders(false);
+  const mergedInit: RequestInit = {
+    ...init,
+    cache: 'no-store',
+    headers: {
+      ...(init.headers as Record<string, string> | undefined),
+      ...initialHeaders,
+    },
+  };
+  let res = await fetch(url, mergedInit);
+  if (res.status === 401 && auth.currentUser) {
+    await exchangeFirebaseAdminSession(true);
+    const refreshedHeaders = await getAdminAuthHeaders(true);
+    res = await fetch(url, {
+      ...init,
+      cache: 'no-store',
+      headers: {
+        ...(init.headers as Record<string, string> | undefined),
+        ...refreshedHeaders,
+      },
+    });
+  }
+  return res;
 }
 
 function readLocalTrackings(): Record<string, PersistedTracking> {
@@ -2128,17 +2555,20 @@ async function fetchTrackingFromApi(
     const res = await fetch(`/api/trackings/${encodeURIComponent(normalizedCode)}`, {
       cache: 'no-store',
     });
+    const parsed = await readJsonApiResponse<{ tracking?: Record<string, unknown> }>(res);
+    if (!parsed.isJson) {
+      return { ok: false, status: res.status, tracking: null };
+    }
     if (res.status === 404) {
       return { ok: true, status: 404, tracking: null };
     }
     if (!res.ok) {
       return { ok: false, status: res.status, tracking: null };
     }
-    const data = (await res.json()) as { tracking?: Record<string, unknown> };
-    if (!data?.tracking) {
+    if (!parsed.data?.tracking) {
       return { ok: true, status: 200, tracking: null };
     }
-    const mapped = mapTrackingDoc(normalizedCode, data.tracking);
+    const mapped = mapTrackingDoc(normalizedCode, parsed.data.tracking);
     if (!mapped.active || mapped.code !== normalizedCode) {
       return { ok: true, status: 200, tracking: null };
     }
@@ -2162,8 +2592,10 @@ export async function lookupTrackingByCode(
   }
 
   const localMatch = readLocalTrackings()[normalized];
+  let firestoreAnswered = false;
   try {
     const snap = await getDoc(doc(db, 'trackings', normalized));
+    firestoreAnswered = true;
     if (snap.exists()) {
       const mapped = mapTrackingDoc(snap.id, snap.data() as Record<string, unknown>);
       if (mapped.active && mapped.code === normalized) {
@@ -2172,13 +2604,13 @@ export async function lookupTrackingByCode(
       return { tracking: null };
     }
   } catch {
-    // Firestore /trackings may be inaccessible when server API is authoritative
+    firestoreAnswered = false;
   }
 
   if (localMatch && localMatch.active) {
     return { tracking: localMatch };
   }
-  if (!apiRes.ok) {
+  if (!apiRes.ok && !firestoreAnswered) {
     return { tracking: null, rulesError: true };
   }
   return { tracking: null };
@@ -2197,6 +2629,8 @@ export function subscribeLiveTrackingByCode(
   let disposed = false;
   let apiSettled = false;
   let apiHealthy = false;
+  let firestoreSettled = false;
+  let firestoreHealthy = false;
   let latestApi: PersistedTracking | null = null;
   let latestFirestore: PersistedTracking | null = null;
 
@@ -2215,8 +2649,8 @@ export function subscribeLiveTrackingByCode(
       onData(localMatch, false);
       return;
     }
-    if (apiSettled) {
-      onData(null, !apiHealthy);
+    if (apiSettled || firestoreSettled) {
+      onData(null, !apiHealthy && !firestoreHealthy && apiSettled && firestoreSettled);
     }
   };
 
@@ -2236,6 +2670,8 @@ export function subscribeLiveTrackingByCode(
   const unsubFirestore = onSnapshot(
     doc(db, 'trackings', normalized),
     (snap) => {
+      firestoreSettled = true;
+      firestoreHealthy = true;
       if (snap.exists()) {
         latestFirestore = mapTrackingDoc(snap.id, snap.data() as Record<string, unknown>);
       } else {
@@ -2244,7 +2680,7 @@ export function subscribeLiveTrackingByCode(
       emitBest();
     },
     () => {
-      // Ignore Firestore /trackings permission error when /api/trackings handles global reads
+      firestoreSettled = true;
       emitBest();
     }
   );
@@ -2285,6 +2721,8 @@ export function subscribeTrackingsAdmin(
 ): () => void {
   let disposed = false;
   let apiHealthy = false;
+  let apiChecked = false;
+  let firestoreHealthy = false;
   let apiList: PersistedTracking[] = [];
   let firestoreList: PersistedTracking[] = [];
   const privateCache: Record<
@@ -2292,17 +2730,20 @@ export function subscribeTrackingsAdmin(
     { customerCpf?: string; customerPhone?: string; customerAddress?: string; customerCep?: string }
   > = {};
 
+  const canUseFirestoreAdmin = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+
   const mergeAndEmit = () => {
     if (disposed) return;
     const localMap = readLocalTrackings();
     const mergedByCode = new Map<string, PersistedTracking>();
 
-    // Start with local cache
     Object.values(localMap).forEach((localItem) => {
       mergedByCode.set(localItem.code, localItem);
     });
 
-    // Layer Firestore records if available
     firestoreList.forEach((item) => {
       const existing = mergedByCode.get(item.code);
       const priv = privateCache[item.code];
@@ -2315,7 +2756,6 @@ export function subscribeTrackingsAdmin(
       });
     });
 
-    // Authoritative central server trackings override stale local entries
     apiList.forEach((item) => {
       const existing = mergedByCode.get(item.code);
       mergedByCode.set(item.code, {
@@ -2338,24 +2778,28 @@ export function subscribeTrackingsAdmin(
     try {
       const headers = await getAdminAuthHeaders();
       if (!headers['X-Admin-Session'] && !headers.Authorization) {
-        mergeAndEmit();
-        return;
-      }
-      const res = await fetch('/api/trackings', { headers, cache: 'no-store' });
-      if (!res.ok) {
-        if (!apiHealthy) {
+        apiChecked = true;
+        if (!canUseFirestoreAdmin) {
           onPermissionError?.();
         }
         mergeAndEmit();
         return;
       }
-      const data = (await res.json()) as { items?: Array<Record<string, unknown>> };
+      const res = await fetchAdminWithAuthRetry('/api/trackings', { cache: 'no-store' });
+      const parsed = await readJsonApiResponse<{ items?: Array<Record<string, unknown>> }>(res);
+      apiChecked = true;
+      if (!res.ok || !parsed.isJson || !parsed.data) {
+        if (!apiHealthy && !canUseFirestoreAdmin && !firestoreHealthy) {
+          onPermissionError?.();
+        }
+        mergeAndEmit();
+        return;
+      }
       apiHealthy = true;
-      apiList = Array.isArray(data.items)
-        ? data.items.map((item) => mapTrackingDoc(String(item.code || ''), item))
+      apiList = Array.isArray(parsed.data.items)
+        ? parsed.data.items.map((item) => mapTrackingDoc(String(item.code || ''), item))
         : [];
 
-      // Auto-migrate any trackings previously saved only in localStorage up to the shared server
       if (!syncedLocalOnce) {
         syncedLocalOnce = true;
         const apiCodes = new Set(apiList.map((t) => t.code));
@@ -2371,16 +2815,16 @@ export function subscribeTrackingsAdmin(
         if (localMissing.length > 0) {
           for (const item of localMissing) {
             try {
-              const pushRes = await fetch('/api/trackings', {
+              const pushRes = await fetchAdminWithAuthRetry('/api/trackings', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...headers },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(item),
               });
-              if (pushRes.ok) {
-                const pushed = (await pushRes.json()) as { tracking?: Record<string, unknown> };
-                if (pushed?.tracking) {
-                  apiList.push(mapTrackingDoc(item.code, pushed.tracking));
-                }
+              const pushed = await readJsonApiResponse<{ tracking?: Record<string, unknown> }>(
+                pushRes
+              );
+              if (pushRes.ok && pushed.isJson && pushed.data?.tracking) {
+                apiList.push(mapTrackingDoc(item.code, pushed.data.tracking));
               }
             } catch {
               // ignore individual migration error
@@ -2391,22 +2835,22 @@ export function subscribeTrackingsAdmin(
 
       mergeAndEmit();
     } catch {
+      apiChecked = true;
+      if (!canUseFirestoreAdmin && !firestoreHealthy) {
+        onPermissionError?.();
+      }
       mergeAndEmit();
     }
   };
 
   fetchAdminTrackings();
 
-  const canUseFirestoreAdmin = isBootstrappedAdminUser(
-    auth.currentUser?.email,
-    auth.currentUser?.emailVerified
-  );
-
   let unsubFirestore: () => void = () => {};
   if (canUseFirestoreAdmin) {
     unsubFirestore = onSnapshot(
       collection(db, 'trackings'),
       (snap) => {
+        firestoreHealthy = true;
         firestoreList = snap.docs.map((d) =>
           mapTrackingDoc(d.id, d.data() as Record<string, unknown>)
         );
@@ -2431,19 +2875,29 @@ export function subscribeTrackingsAdmin(
         });
       },
       () => {
-        // Only warn if central /api/trackings is also unavailable
-        if (!apiHealthy) {
-          mergeAndEmit();
+        firestoreHealthy = false;
+        if (apiChecked && !apiHealthy) {
+          onPermissionError?.();
         }
+        mergeAndEmit();
       }
     );
   }
 
+  ensureStoreSyncHub();
   const handleLocalChange = () => {
     fetchAdminTrackings();
   };
+  const handleSseTracking = (ev: Event) => {
+    const detail = (ev as CustomEvent<{ topic?: string }>).detail;
+    if (!detail?.topic || detail.topic === 'trackings') {
+      fetchAdminTrackings();
+    }
+  };
   if (typeof window !== 'undefined') {
     window.addEventListener(TRACKING_UPDATED_EVENT, handleLocalChange);
+    window.addEventListener(STORE_SYNC_EVENT, handleSseTracking);
+    window.addEventListener('bt-admin-session-ready', handleLocalChange);
     window.addEventListener('storage', handleLocalChange);
   }
 
@@ -2452,6 +2906,8 @@ export function subscribeTrackingsAdmin(
     unsubFirestore();
     if (typeof window !== 'undefined') {
       window.removeEventListener(TRACKING_UPDATED_EVENT, handleLocalChange);
+      window.removeEventListener(STORE_SYNC_EVENT, handleSseTracking);
+      window.removeEventListener('bt-admin-session-ready', handleLocalChange);
       window.removeEventListener('storage', handleLocalChange);
     }
   };
@@ -2508,29 +2964,45 @@ export async function upsertTrackingAdmin(payload: {
     payload.invoiceNumber?.trim() ||
     `NFE-${cleanCode.replace(/[^0-9]/g, '').slice(0, 6) || '001482'}`
   ).slice(0, 40);
-  const orderTotal = Math.max(0, Number(payload.orderTotal || 0));
-  const weightKg = Math.max(0.1, Math.min(500, Number(payload.weightKg || 1.2)));
+  const parsedOrderTotal = Number(payload.orderTotal ?? 0);
+  const orderTotal = Number.isFinite(parsedOrderTotal)
+    ? Math.min(5000000, Math.max(0, parsedOrderTotal))
+    : 0;
+  const parsedWeightKg = Number(payload.weightKg ?? 1.2);
+  const weightKg = Number.isFinite(parsedWeightKg)
+    ? Math.max(0.1, Math.min(500, parsedWeightKg))
+    : 1.2;
+
+  const safeCustomerLabel = (payload.customerLabel.trim() || 'Cliente Brasil Tech').slice(0, 80);
+  const safeProductSummary = (payload.productSummary.trim() || 'Pedido Brasil Tech').slice(0, 240);
+  const safeDestination = (
+    destinationCityState.length >= 2 ? destinationCityState : 'São Paulo - SP'
+  ).slice(0, 120);
+  const rawShipping = payload.shippingLabel.trim();
+  const safeShippingLabel = (
+    rawShipping.length >= 2 ? rawShipping : 'Correios SEDEX • Brasil Tech Express'
+  ).slice(0, 120);
 
   const existingLocal = readLocalTrackings()[cleanCode];
   let resultTracking: PersistedTracking = {
     code: cleanCode,
     orderCode: payload.orderCode.trim().slice(0, 40),
-    customerLabel: payload.customerLabel.trim().slice(0, 80),
+    customerLabel: safeCustomerLabel,
     maskedCpf,
     customerCpf: cleanCpf,
     customerPhone: cleanPhone,
     customerAddress: cleanAddress,
     customerCep: cleanCep,
-    productSummary: payload.productSummary.trim().slice(0, 240),
-    cityState: destinationCityState,
+    productSummary: safeProductSummary,
+    cityState: safeDestination,
     originCityState,
-    destinationCityState,
+    destinationCityState: safeDestination,
     currentLocation,
     routeProgress,
     invoiceNumber,
     orderTotal,
     weightKg,
-    shippingLabel: (payload.shippingLabel.trim() || 'Entrega Padrão Brasil Tech').slice(0, 120),
+    shippingLabel: safeShippingLabel,
     statusStep,
     statusNote: payload.statusNote.trim().slice(0, 300),
     active: Boolean(payload.active),
@@ -2538,34 +3010,48 @@ export async function upsertTrackingAdmin(payload: {
     updatedAtLabel: nowLabel,
   };
 
-  // Persist to shared server first so any client device can immediately view it
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch('/api/trackings', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders,
-    },
-    body: JSON.stringify(resultTracking),
-    cache: 'no-store',
-  });
-
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(
-      errBody.error || 'Não foi possível liberar o rastreio no servidor. Faça login novamente.'
-    );
+  // Persist to shared server first (retry once on transient error; only consider success when valid JSON is returned)
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiStatus = 0;
+  let apiErrorMsg = '';
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const res = await fetchAdminWithAuthRetry('/api/trackings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(resultTracking),
+        cache: 'no-store',
+      });
+      apiStatus = res.status;
+      const parsed = await readJsonApiResponse<{
+        tracking?: Record<string, unknown>;
+        error?: string;
+      }>(res);
+      apiIsJson = parsed.isJson;
+      if (res.ok && parsed.isJson && parsed.data?.tracking?.code) {
+        apiOk = true;
+        resultTracking = mapTrackingDoc(cleanCode, parsed.data.tracking);
+        break;
+      }
+      if (parsed.data?.error) {
+        apiErrorMsg = parsed.data.error;
+      }
+      if (apiStatus === 400 || apiStatus === 401 || attempt === 1) {
+        break;
+      }
+    } catch {
+      apiOk = false;
+    }
   }
 
-  const savedJson = (await res.json().catch(() => ({}))) as {
-    tracking?: Record<string, unknown>;
-  };
-  if (savedJson?.tracking) {
-    resultTracking = mapTrackingDoc(cleanCode, savedJson.tracking);
+  if (apiIsJson && apiStatus === 400) {
+    throw new Error(apiErrorMsg || 'Verifique código, cliente, produto e cidade de destino.');
   }
-  writeLocalTracking(resultTracking);
 
-  // Best-effort Firestore mirror when signed in via verified Google Admin
+  // Also persist directly in Firestore whenever Firebase Admin is signed in (resilient dual-write)
+  let firestoreOk = false;
+  let firestoreError = '';
   const canWriteFirestore = isBootstrappedAdminUser(
     auth.currentUser?.email,
     auth.currentUser?.emailVerified
@@ -2573,87 +3059,152 @@ export async function upsertTrackingAdmin(payload: {
   if (canWriteFirestore) {
     const ref = doc(db, 'trackings', cleanCode);
     const privRef = doc(db, 'trackings', cleanCode, 'private', 'details');
+    const publicData = {
+      orderCode: resultTracking.orderCode,
+      customerLabel: resultTracking.customerLabel,
+      maskedCpf,
+      productSummary: resultTracking.productSummary,
+      cityState: safeDestination,
+      originCityState,
+      destinationCityState: safeDestination,
+      currentLocation,
+      routeProgress,
+      invoiceNumber,
+      orderTotal,
+      weightKg,
+      shippingLabel: resultTracking.shippingLabel,
+      statusStep,
+      statusNote: resultTracking.statusNote,
+      active: resultTracking.active,
+      updatedAtLabel: resultTracking.updatedAtLabel,
+    };
+    const privateData = {
+      code: cleanCode,
+      customerCpf: cleanCpf,
+      customerPhone: cleanPhone,
+      customerAddress: cleanAddress,
+      customerCep: cleanCep,
+      updatedAt: serverTimestamp(),
+    };
+
+    const commitCreateFresh = async (createdLabel: string) => {
+      const freshBatch = writeBatch(db);
+      freshBatch.set(ref, {
+        code: cleanCode,
+        ...publicData,
+        createdAtLabel: createdLabel.slice(0, 60),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      freshBatch.set(privRef, privateData);
+      await freshBatch.commit();
+    };
+
     try {
       const existingSnap = await getDoc(ref);
-      const publicData = {
-        orderCode: resultTracking.orderCode,
-        customerLabel: resultTracking.customerLabel,
-        maskedCpf,
-        productSummary: resultTracking.productSummary,
-        cityState: destinationCityState,
-        originCityState,
-        destinationCityState,
-        currentLocation,
-        routeProgress,
-        invoiceNumber,
-        orderTotal,
-        weightKg,
-        shippingLabel: resultTracking.shippingLabel,
-        statusStep,
-        statusNote: resultTracking.statusNote,
-        active: resultTracking.active,
-        updatedAtLabel: resultTracking.updatedAtLabel,
-      };
-      const privateData = {
-        code: cleanCode,
-        customerCpf: cleanCpf,
-        customerPhone: cleanPhone,
-        customerAddress: cleanAddress,
-        customerCep: cleanCep,
-        updatedAt: serverTimestamp(),
-      };
+      const existingData = existingSnap.exists()
+        ? (existingSnap.data() as Record<string, unknown>)
+        : null;
 
-      const batch = writeBatch(db);
       if (!existingSnap.exists()) {
-        batch.set(ref, {
-          code: cleanCode,
-          ...publicData,
-          createdAtLabel: resultTracking.createdAtLabel,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
+        await commitCreateFresh(resultTracking.createdAtLabel);
+        firestoreOk = true;
+      } else if (!existingData?.createdAt || !existingData?.createdAtLabel || typeof existingData?.code !== 'string') {
+        // Legacy/partial doc cannot pass `update` rule immutable checks -> recreate cleanly
+        await deleteDoc(ref).catch(() => undefined);
+        await commitCreateFresh(
+          String(existingData?.createdAtLabel || resultTracking.createdAtLabel)
+        );
+        firestoreOk = true;
       } else {
-        batch.update(ref, {
-          ...publicData,
-          updatedAt: serverTimestamp(),
-        });
+        try {
+          const batch = writeBatch(db);
+          batch.update(ref, {
+            ...publicData,
+            updatedAt: serverTimestamp(),
+          });
+          batch.set(privRef, privateData);
+          await batch.commit();
+          firestoreOk = true;
+        } catch {
+          // If an unexpected legacy field caused update validation failure, delete and recreate cleanly
+          await deleteDoc(ref).catch(() => undefined);
+          await commitCreateFresh(
+            String(existingData?.createdAtLabel || resultTracking.createdAtLabel)
+          );
+          firestoreOk = true;
+        }
       }
-      batch.set(privRef, privateData);
-      await batch.commit();
-    } catch {
-      // /api/trackings already persisted globally; never fail UI over un-deployed Firestore /trackings rules
+    } catch (err) {
+      firestoreError = err instanceof Error ? err.message : '';
     }
   }
 
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('criar e liberar rastreios'));
+    }
+    if (firestoreError) {
+      throw new Error(`Erro ao gravar rastreio no Firebase: ${firestoreError}`);
+    }
+    throw new Error(
+      apiErrorMsg ||
+        'Não foi possível liberar o rastreio no servidor. Clique em "Conectar Google Admin" ou faça login novamente.'
+    );
+  }
+
+  writeLocalTracking(resultTracking);
+  broadcastStoreTopic('trackings', cleanCode);
   return resultTracking;
 }
 
 export async function deleteTrackingAdmin(code: string): Promise<void> {
   const cleanCode = sanitizeTrackingCodeForAdmin(code);
-  const authHeaders = await getAdminAuthHeaders();
-  const res = await fetch(`/api/trackings/${encodeURIComponent(cleanCode)}`, {
-    method: 'DELETE',
-    headers: authHeaders,
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao excluir rastreio no servidor.');
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiErrorMsg = '';
+  try {
+    const res = await fetchAdminWithAuthRetry(
+      `/api/trackings/${encodeURIComponent(cleanCode)}`,
+      {
+        method: 'DELETE',
+        cache: 'no-store',
+      }
+    );
+    const parsed = await readJsonApiResponse<{ ok?: boolean; error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) {
+      apiOk = true;
+    } else if (parsed.data?.error) {
+      apiErrorMsg = parsed.data.error;
+    }
+  } catch {
+    apiOk = false;
   }
-  deleteLocalTracking(cleanCode);
 
+  let firestoreOk = false;
   const canWriteFirestore = isBootstrappedAdminUser(
     auth.currentUser?.email,
     auth.currentUser?.emailVerified
   );
-  if (!canWriteFirestore) return;
-
-  try {
-    await deleteDoc(doc(db, 'trackings', cleanCode, 'private', 'details')).catch(() => undefined);
-    await deleteDoc(doc(db, 'trackings', cleanCode)).catch(() => undefined);
-  } catch {
-    // Ignore optional Firestore cleanup error
+  if (canWriteFirestore) {
+    try {
+      await deleteDoc(doc(db, 'trackings', cleanCode, 'private', 'details')).catch(() => undefined);
+      await deleteDoc(doc(db, 'trackings', cleanCode));
+      firestoreOk = true;
+    } catch {
+      // Ignore optional Firestore cleanup error
+    }
   }
+
+  if (!apiOk && !firestoreOk) {
+    if (!apiIsJson && !canWriteFirestore) {
+      throw new Error(getStaticHostingAuthMessage('excluir rastreios'));
+    }
+    throw new Error(apiErrorMsg || 'Erro ao excluir rastreio no servidor.');
+  }
+  deleteLocalTracking(cleanCode);
+  broadcastStoreTopic('trackings', cleanCode);
 }
 
 // --- Editable Storefront Banners, Categories & Pixel Config ---
@@ -2708,8 +3259,15 @@ export function subscribeStorefrontContent(
   const loadFromServer = async () => {
     try {
       const res = await fetch('/api/storefront-content', { cache: 'no-store' });
-      if (!res.ok || disposed) return;
-      const data = (await res.json()) as Partial<StorefrontContentState>;
+      const parsed = await readJsonApiResponse<Partial<StorefrontContentState>>(res);
+      if (!res.ok || !parsed.isJson || !parsed.data || disposed) {
+        const localFallback = readLocalStorefrontContent();
+        if (localFallback && !disposed) {
+          onData(localFallback);
+        }
+        return;
+      }
+      const data = parsed.data;
       const localFallback = readLocalStorefrontContent();
       const merged: StorefrontContentState = {
         banners:
@@ -2770,7 +3328,6 @@ export function subscribeStorefrontContent(
 export async function saveStorefrontContentAdmin(
   next: StorefrontContentState
 ): Promise<StorefrontContentState> {
-  const authHeaders = await getAdminAuthHeaders();
   const payload: StorefrontContentState = {
     banners: next.banners.slice(0, 20),
     categories: next.categories.slice(0, 30),
@@ -2778,16 +3335,59 @@ export async function saveStorefrontContentAdmin(
     installmentsMax: Math.min(24, Math.max(1, Math.round(Number(next.installmentsMax || 12)))),
   };
 
-  const res = await fetch('/api/storefront-content', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
-    body: JSON.stringify(payload),
-    cache: 'no-store',
-  });
+  let apiOk = false;
+  let apiIsJson = false;
+  let apiError = '';
+  try {
+    const res = await fetchAdminWithAuthRetry('/api/storefront-content', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      cache: 'no-store',
+    });
+    const parsed = await readJsonApiResponse<{ error?: string }>(res);
+    apiIsJson = parsed.isJson;
+    if (res.ok && parsed.isJson) apiOk = true;
+    else if (parsed.data?.error) apiError = parsed.data.error;
+  } catch {
+    apiOk = false;
+  }
 
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(errBody.error || 'Erro ao salvar banners e categorias no servidor.');
+  let firestoreOk = false;
+  const canWriteFirestore = isBootstrappedAdminUser(
+    auth.currentUser?.email,
+    auth.currentUser?.emailVerified
+  );
+  if (canWriteFirestore) {
+    try {
+      const batch = writeBatch(db);
+      payload.banners.forEach((b, idx) => {
+        const cleanId = String(b.id || `ban_${idx}`).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 60);
+        if (!cleanId) return;
+        batch.set(doc(db, 'banners', cleanId), {
+          id: cleanId,
+          slot: b.slot === 'hero' ? 'hero' : 'secondary',
+          badge: String(b.badge || '').slice(0, 80),
+          title: String(b.title || 'Banner').slice(0, 160),
+          subtitle: String(b.subtitle || '').slice(0, 320),
+          ctaLabel: String(b.ctaLabel || '').slice(0, 60),
+          targetDivision: String(b.targetDivision || 'all').slice(0, 60),
+          targetCategory: String(b.targetCategory || '').slice(0, 60),
+          image: String(b.image || '').slice(0, 500),
+          order: idx,
+          active: b.active !== false,
+          updatedAt: serverTimestamp(),
+        });
+      });
+      await batch.commit();
+      firestoreOk = true;
+    } catch {
+      firestoreOk = false;
+    }
+  }
+
+  if (!apiOk && !firestoreOk && apiIsJson) {
+    throw new Error(apiError || 'Erro ao salvar banners e categorias no servidor.');
   }
 
   if (typeof window !== 'undefined') {

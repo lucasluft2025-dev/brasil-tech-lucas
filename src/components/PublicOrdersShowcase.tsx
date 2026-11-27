@@ -20,6 +20,8 @@ import {
   saveShowcaseOverride,
 } from '../data/orderShowcase';
 
+import { TRACKING_STAGE_LABELS } from '../services/firestoreStore';
+
 interface PublicOrdersShowcaseProps {
   products: MarketplaceProduct[];
   liveOrders: MarketplaceOrder[];
@@ -32,13 +34,7 @@ interface PublicOrdersShowcaseProps {
   onNotify: (msg: string) => void;
 }
 
-const ORDER_STEPS = [
-  'Pedido feito',
-  'PIX aprovado',
-  'Em separação e testes',
-  'Em transporte',
-  'Entregue',
-];
+const ORDER_STEPS = [...TRACKING_STAGE_LABELS];
 
 const STATUS_META: Record<
   ShowcaseOrderStatus,

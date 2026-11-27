@@ -41,6 +41,10 @@ export function isValidAdminSessionToken(token: string | null | undefined): bool
   return Boolean(token && token === EXPECTED_PASSWORD_SESSION_TOKEN);
 }
 
+export function getExpectedAdminSessionToken(): string {
+  return EXPECTED_PASSWORD_SESSION_TOKEN;
+}
+
 export function isBootstrappedAdminEmail(
   email?: string | null,
   emailVerified?: boolean | null

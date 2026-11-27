@@ -14,6 +14,7 @@ import {
   Share2,
   ShieldCheck,
   Smartphone,
+  Sparkles,
   Tag,
   Trash2,
   X,
@@ -61,10 +62,14 @@ import {
   StoreSettings,
   StorefrontContentState,
   checkIsUserAdmin,
+  clearAdminSessionToken,
   createOrderFirestore,
   createQuestionFirestore,
   createReviewFirestore,
+  exchangeFirebaseAdminSession,
   normalizeTrackingLookupInput,
+  persistAdminSessionToken,
+  readStoredAdminSessionToken,
   recordGuestOrderOnServer,
   seedInitialCatalogIfEmpty,
   subscribeCoupons,
@@ -87,6 +92,7 @@ type ViewMode =
   | 'gamer'
   | 'acessorios'
   | 'ofertas'
+  | 'lancamentos'
   | 'product'
   | 'checkout'
   | 'orders'
@@ -99,13 +105,9 @@ const ADMIN_SESSION_STORAGE_KEY = 'bt_admin_session_v2';
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [firebaseAdmin, setFirebaseAdmin] = useState<boolean>(false);
-  const [sessionAdminVerified, setSessionAdminVerified] = useState<boolean>(() => {
-    try {
-      return isValidAdminSessionToken(sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY));
-    } catch {
-      return false;
-    }
-  });
+  const [sessionAdminVerified, setSessionAdminVerified] = useState<boolean>(() =>
+    Boolean(readStoredAdminSessionToken())
+  );
   const [adminEmailInput, setAdminEmailInput] = useState<string>('');
   const [adminPassInput, setAdminPassInput] = useState<string>('');
   const [adminAuthError, setAdminAuthError] = useState<string>('');
@@ -236,6 +238,7 @@ export default function App() {
       }
 
       if (adminStatus) {
+        await exchangeFirebaseAdminSession().catch(() => null);
         await seedInitialCatalogIfEmpty().catch(() => undefined);
       }
     });
@@ -342,6 +345,8 @@ export default function App() {
         setViewMode('acessorios');
       } else if (h === '#/ofertas') {
         setViewMode('ofertas');
+      } else if (h === '#/lancamentos') {
+        setViewMode('lancamentos');
       } else if (h === '#/checkout') {
         setViewMode('checkout');
       } else if (h === '#/pedidos') {
@@ -372,6 +377,7 @@ export default function App() {
         setShowcaseOrderCode(null);
         setInitialTrackingCode(undefined);
       }
+      window.scrollTo({ top: 0, behavior: 'auto' });
     };
     applyHash();
     window.addEventListener('hashchange', applyHash);
@@ -387,10 +393,11 @@ export default function App() {
     const subtitleMap: Record<Exclude<ViewMode, 'product'>, string | undefined> = {
       home: undefined,
       iphones: 'iPhones Certificados',
-      android: 'Smartphones Android',
+      android: 'Samsung & Smartphones Android',
       gamer: `Brasil Tech Gamer — ${gamerSubPage}`,
       acessorios: 'Acessórios & Controles',
       ofertas: 'Ofertas Especiais',
+      lancamentos: 'Lançamentos e Novidades',
       checkout: 'Checkout Seguro',
       orders: 'Pedidos e Rastreamento ao Vivo',
       showcase: 'Pedidos Enviados e Entregues',
@@ -419,7 +426,11 @@ export default function App() {
       showToast(`Bem-vindo(a), ${cred.user.displayName || 'Cliente'}!`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : '';
-      if (!msg.includes('popup-closed-by-user')) {
+      if (msg.includes('unauthorized-domain')) {
+        showToast(
+          `Domínio (${window.location.hostname}) não autorizado no Firebase Auth. Adicione em Authentication > Settings > Authorized domains.`
+        );
+      } else if (!msg.includes('popup-closed-by-user')) {
         showToast('Não foi possível concluir o login Google. Tente novamente.');
       }
     } finally {
@@ -444,11 +455,7 @@ export default function App() {
       return;
     }
     setSessionAdminVerified(true);
-    try {
-      sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, verifiedToken);
-    } catch {
-      // ignore storage quota
-    }
+    persistAdminSessionToken(verifiedToken);
 
     setLoginOpen(false);
     setAdminPassInput('');
@@ -458,11 +465,7 @@ export default function App() {
 
   const handleSignOut = async () => {
     setSessionAdminVerified(false);
-    try {
-      sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
-    } catch {
-      // ignore
-    }
+    clearAdminSessionToken();
     await signOut(auth).catch(() => undefined);
     setLoginOpen(false);
     if (viewMode === 'admin') {
@@ -504,6 +507,7 @@ export default function App() {
     if (mode === 'gamer') window.location.hash = '#/gamer';
     if (mode === 'acessorios') window.location.hash = '#/acessorios';
     if (mode === 'ofertas') window.location.hash = '#/ofertas';
+    if (mode === 'lancamentos') window.location.hash = '#/lancamentos';
     if (mode === 'checkout') window.location.hash = '#/checkout';
     if (mode === 'orders') {
       setInitialTrackingCode(undefined);
@@ -561,6 +565,10 @@ export default function App() {
     }
     if (dest === 'ofertas') {
       navigateView('ofertas');
+      return;
+    }
+    if (dest === 'lancamentos') {
+      navigateView('lancamentos');
       return;
     }
     if (dest === 'orders') {
@@ -762,6 +770,10 @@ export default function App() {
           lower.includes('redmi') ||
           lower.includes('motorola');
         if (!isAndroid) return false;
+        if (androidBrandFilter === 'Outros') {
+          const b = meta.brand.toLowerCase();
+          return b !== 'samsung' && b !== 'xiaomi';
+        }
         if (androidBrandFilter !== 'Todas') {
           return meta.brand.toLowerCase() === androidBrandFilter.toLowerCase();
         }
@@ -786,6 +798,14 @@ export default function App() {
       .sort((a, b) => (1 - b.price / b.old) - (1 - a.price / a.old));
   }, [catalogProducts]);
 
+  const newArrivalsProducts = useMemo(() => {
+    return [...catalogProducts].sort(
+      (a, b) =>
+        Number(deriveProductMeta(b).isNewArrival) - Number(deriveProductMeta(a).isNewArrival) ||
+        b.id - a.id
+    );
+  }, [catalogProducts]);
+
   const cartCount = useMemo(() => cart.reduce((n, x) => n + x.qty, 0), [cart]);
   const cartTotal = useMemo(
     () =>
@@ -806,6 +826,7 @@ export default function App() {
     if (viewMode === 'android') return 'android';
     if (viewMode === 'acessorios') return 'acessorios';
     if (viewMode === 'ofertas') return 'ofertas';
+    if (viewMode === 'lancamentos') return 'lancamentos';
     if (viewMode === 'orders') return 'orders';
     if (viewMode === 'security') return 'security';
     if (viewMode === 'admin') return 'admin';
@@ -845,7 +866,7 @@ export default function App() {
     cepModalOpen;
 
   return (
-    <div className="min-h-screen flex flex-col bg-white text-slate-900">
+    <div className="min-h-screen max-w-full overflow-x-clip flex flex-col bg-white text-slate-900">
       <StoreHeader
         storeSettings={storeSettings}
         products={catalogProducts}
@@ -896,7 +917,7 @@ export default function App() {
         onOpenCart={() => setCartOpen(true)}
       />
 
-      <main className="flex-1 w-full">
+      <main className="flex-1 w-full min-w-0">
         {viewMode === 'admin' ? (
           <div className="max-w-7xl mx-auto px-4 py-6">
             {isAdmin ? (
@@ -913,21 +934,22 @@ export default function App() {
                   currentUser?.email || (sessionAdminVerified ? PRIMARY_ADMIN_LOGIN_EMAIL : '')
                 }
                 isBootstrappedAdmin={isBootstrappedAdmin}
+                onConnectGoogleAdmin={handleGoogleSignIn}
                 onAdminLogout={handleSignOut}
                 onBackToStore={() => goHome()}
                 onOpenOrdersShowcase={() => navigateView('showcase')}
                 onNotify={showToast}
               />
             ) : (
-              <div className="max-w-md mx-auto bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 shadow-sm my-8">
-                <div className="flex items-center gap-2 text-blue-600 text-xs font-semibold mb-2">
+              <div className="max-w-md mx-auto bg-white border border-zinc-200 rounded-2xl p-6 sm:p-8 shadow-sm my-8">
+                <div className="flex items-center gap-2 text-lime-800 text-xs font-bold mb-2">
                   <Lock size={15} />
                   <span>Área Administrativa Protegida</span>
                 </div>
-                <h1 className="text-xl font-bold text-slate-950 mb-2">
+                <h1 className="text-xl font-bold text-zinc-950 mb-2">
                   Acesso Exclusivo do Proprietário
                 </h1>
-                <p className="text-xs sm:text-sm text-slate-600 mb-5">
+                <p className="text-xs sm:text-sm text-zinc-600 mb-5">
                   Entre com suas credenciais administrativas da{' '}
                   <strong>{storeSettings.storeName}</strong> para gerenciar catálogo, preços,
                   banners, pedidos, rastreios, NF-e e etiquetas.
@@ -950,7 +972,7 @@ export default function App() {
                 )}
 
                 <form className="space-y-3" onSubmit={handleAdminPasswordLogin}>
-                  <label className="block text-xs font-semibold text-slate-700">
+                  <label className="block text-xs font-semibold text-zinc-700">
                     E-mail administrativo
                     <input
                       type="email"
@@ -958,10 +980,10 @@ export default function App() {
                       value={adminEmailInput}
                       onChange={(e) => setAdminEmailInput(e.target.value)}
                       required
-                      className="mt-1 w-full min-h-[42px] px-3 rounded-lg border border-slate-300 text-sm text-slate-900"
+                      className="mt-1 w-full min-h-[42px] px-3 rounded-lg border border-zinc-300 text-sm text-zinc-950"
                     />
                   </label>
-                  <label className="block text-xs font-semibold text-slate-700">
+                  <label className="block text-xs font-semibold text-zinc-700">
                     Senha
                     <input
                       type="password"
@@ -969,7 +991,7 @@ export default function App() {
                       value={adminPassInput}
                       onChange={(e) => setAdminPassInput(e.target.value)}
                       required
-                      className="mt-1 w-full min-h-[42px] px-3 rounded-lg border border-slate-300 text-sm text-slate-900"
+                      className="mt-1 w-full min-h-[42px] px-3 rounded-lg border border-zinc-300 text-sm text-zinc-950"
                     />
                   </label>
                   {adminAuthError && (
@@ -980,7 +1002,7 @@ export default function App() {
                   <button
                     type="submit"
                     disabled={authLoading}
-                    className="w-full min-h-[44px] rounded-xl bg-slate-900 hover:bg-blue-600 text-white text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
+                    className="w-full min-h-[44px] rounded-xl bg-zinc-950 hover:bg-lime-400 hover:text-zinc-950 text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-colors"
                   >
                     <Lock size={15} />
                     <span>{authLoading ? 'Validando...' : 'Entrar no Painel Admin'}</span>
@@ -1156,30 +1178,30 @@ export default function App() {
           />
         ) : viewMode === 'android' ? (
           <section className="max-w-7xl mx-auto px-4 py-8 sm:py-12" aria-label="Smartphones Android">
-            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 sm:p-8 mb-6 flex flex-col md:flex-row md:items-end justify-between gap-4">
+            <div className="bg-zinc-50 border border-zinc-200 rounded-2xl p-6 sm:p-8 mb-6 flex flex-col md:flex-row md:items-end justify-between gap-4">
               <div>
-                <div className="inline-flex items-center gap-2 text-xs font-semibold text-blue-600 mb-2">
+                <div className="inline-flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-lime-800 mb-2">
                   <Smartphone size={15} />
-                  <span>Brasil Tech Mobile · Smartphones Android</span>
+                  <span>Brasil Tech Mobile · Samsung &amp; Android</span>
                 </div>
-                <h1 className="text-2xl sm:text-3xl font-bold text-slate-950 tracking-tight">
-                  Samsung Galaxy, Xiaomi e linha Android selecionada
+                <h1 className="text-2xl sm:text-3xl font-extrabold text-zinc-950 tracking-tight">
+                  Samsung Galaxy, Xiaomi e smartphones Android
                 </h1>
-                <p className="text-xs sm:text-sm text-slate-600 mt-1.5 max-w-2xl">
+                <p className="text-xs sm:text-sm text-zinc-600 mt-1.5 max-w-2xl">
                   Aparelhos homologados pela Anatel, testados em bancada, com garantia real e
-                  condições transparentes à vista ou parceladas.
+                  condições transparentes à vista no PIX ou parcelamento.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                {['Todas', 'Samsung', 'Xiaomi'].map((brand) => (
+                {['Todas', 'Samsung', 'Xiaomi', 'Outros'].map((brand) => (
                   <button
                     key={brand}
                     type="button"
                     onClick={() => setAndroidBrandFilter(brand)}
-                    className={`min-h-[38px] px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                    className={`min-h-[38px] px-3.5 py-1.5 rounded-lg text-xs font-bold transition-colors ${
                       androidBrandFilter === brand
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-white border border-slate-200 text-slate-700 hover:border-slate-300'
+                        ? 'bg-lime-400 text-zinc-950 border border-lime-500'
+                        : 'bg-white border border-zinc-200 text-zinc-700 hover:border-zinc-400'
                     }`}
                   >
                     {brand}
@@ -1189,14 +1211,14 @@ export default function App() {
             </div>
 
             {androidProducts.length === 0 ? (
-              <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center">
-                <p className="text-sm font-semibold text-slate-700">
-                  Nenhum aparelho Android encontrado para essa marca no momento.
+              <div className="bg-white border border-zinc-200 rounded-2xl p-10 text-center">
+                <p className="text-sm font-semibold text-zinc-700">
+                  Nenhum aparelho Android encontrado para essa seleção no momento.
                 </p>
                 <button
                   type="button"
                   onClick={() => setAndroidBrandFilter('Todas')}
-                  className="mt-4 px-5 py-2.5 rounded-lg bg-blue-600 text-white text-xs font-semibold"
+                  className="mt-4 px-5 py-2.5 rounded-lg bg-lime-400 hover:bg-lime-500 text-zinc-950 text-xs font-extrabold"
                 >
                   Mostrar todos os Android
                 </button>
@@ -1223,14 +1245,14 @@ export default function App() {
           />
         ) : viewMode === 'acessorios' ? (
           <section className="max-w-7xl mx-auto px-4 py-8 sm:py-12" aria-label="Acessórios e Controles">
-            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 sm:p-8 mb-6">
-              <div className="text-xs font-semibold text-blue-600 mb-1.5">
-                Acessórios &amp; Periféricos Oficiais
+            <div className="bg-zinc-50 border border-zinc-200 rounded-2xl p-6 sm:p-8 mb-6">
+              <div className="text-xs font-bold uppercase tracking-wide text-lime-800 mb-1.5">
+                Acessórios &amp; Controles Oficiais
               </div>
-              <h1 className="text-2xl sm:text-3xl font-bold text-slate-950 tracking-tight">
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-zinc-950 tracking-tight">
                 Controles, carregadores, headsets e acessórios testados
               </h1>
-              <p className="text-xs sm:text-sm text-slate-600 mt-1.5">
+              <p className="text-xs sm:text-sm text-zinc-600 mt-1.5">
                 Periféricos para PlayStation, Xbox e smartphones com garantia de funcionamento.
               </p>
             </div>
@@ -1240,25 +1262,48 @@ export default function App() {
           </section>
         ) : viewMode === 'ofertas' ? (
           <section className="max-w-7xl mx-auto px-4 py-8 sm:py-12" aria-label="Ofertas Especiais">
-            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 sm:p-8 mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="bg-zinc-50 border border-zinc-200 rounded-2xl p-6 sm:p-8 mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
-                <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 mb-1.5">
+                <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-lime-800 mb-1.5">
                   <Tag size={14} />
                   <span>Condições Especiais Brasil Tech</span>
                 </div>
-                <h1 className="text-2xl sm:text-3xl font-bold text-slate-950 tracking-tight">
+                <h1 className="text-2xl sm:text-3xl font-extrabold text-zinc-950 tracking-tight">
                   Ofertas com desconto direto no valor à vista
                 </h1>
-                <p className="text-xs sm:text-sm text-slate-600 mt-1">
+                <p className="text-xs sm:text-sm text-zinc-600 mt-1">
                   Produtos selecionados de Mobile e Gamer com redução real sobre o preço anterior.
                 </p>
               </div>
-              <span className="text-xs font-semibold text-slate-600 bg-white border border-slate-200 px-3.5 py-2 rounded-lg shrink-0">
+              <span className="text-xs font-bold text-zinc-950 bg-lime-400 px-3.5 py-2 rounded-lg shrink-0 tabular-nums">
                 {dealsProducts.length} produtos em oferta
               </span>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
               {dealsProducts.map(renderProductCard)}
+            </div>
+          </section>
+        ) : viewMode === 'lancamentos' ? (
+          <section className="max-w-7xl mx-auto px-4 py-8 sm:py-12" aria-label="Lançamentos">
+            <div className="bg-zinc-950 text-white border border-zinc-800 rounded-2xl p-6 sm:p-8 mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-lime-400 mb-1.5">
+                  <Sparkles size={14} />
+                  <span>Novidades no Catálogo Brasil Tech</span>
+                </div>
+                <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
+                  Lançamentos e gerações recentes
+                </h1>
+                <p className="text-xs sm:text-sm text-zinc-300 mt-1">
+                  Modelos mais recentes de smartphones e consoles com estoque disponível para envio.
+                </p>
+              </div>
+              <span className="text-xs font-bold text-zinc-950 bg-lime-400 px-3.5 py-2 rounded-lg shrink-0 tabular-nums">
+                {newArrivalsProducts.length} itens
+              </span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
+              {newArrivalsProducts.slice(0, 12).map(renderProductCard)}
             </div>
           </section>
         ) : (
@@ -1294,10 +1339,42 @@ export default function App() {
         )}
       </main>
 
-      {/* RODAPÉ COMPLETO E ORGANIZADO */}
-      <footer id="ajuda" className="bg-white border-t border-slate-200 mt-12">
-        <div className="max-w-7xl mx-auto px-4 py-10 sm:py-12">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
+      {/* RODAPÉ INSTITUCIONAL DE ALTA CONFIANÇA */}
+      <footer id="ajuda" className="bg-white border-t border-zinc-200 mt-10 sm:mt-12 w-full">
+        <div className="bg-zinc-950 text-white border-b border-zinc-800">
+          <div className="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <ShieldCheck size={18} className="text-lime-400 shrink-0" />
+              <div className="text-xs sm:text-sm min-w-0">
+                <strong className="font-bold text-white">Loja Verificada · Compra 100% Segura</strong>
+                <span className="text-zinc-300 block sm:inline sm:ml-2 text-[11px] sm:text-xs">
+                  Loja física em Curitiba/PR · CNPJ ativo {storeSettings.cnpj} · Devolução em 7 dias (CDC Art. 49)
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => navigateView('orders')}
+                className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-semibold text-white whitespace-nowrap transition-colors"
+              >
+                Rastrear Pedido
+              </button>
+              <a
+                href={waHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
+              >
+                <MessageCircle size={14} />
+                <span>Falar no WhatsApp</span>
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <div className="max-w-7xl mx-auto px-4 pt-8 pb-20 sm:py-12">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-7 sm:gap-8">
             <div className="space-y-3">
               <button
                 type="button"
@@ -1309,15 +1386,18 @@ export default function App() {
                   alt={storeSettings.storeName}
                   className="w-8 h-8 object-contain rounded-md"
                 />
-                <span className="text-lg font-bold tracking-tight text-slate-950 font-[Plus_Jakarta_Sans]">
-                  Brasil <span className="text-blue-600">Tech</span>
+                <span className="text-lg font-extrabold tracking-tight text-zinc-950 font-[Plus_Jakarta_Sans] flex items-center gap-1">
+                  Brasil{' '}
+                  <span className="text-zinc-950 bg-lime-400 px-1.5 py-0.5 rounded-md leading-none">
+                    Tech
+                  </span>
                 </span>
               </button>
-              <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
-                Loja especializada em tecnologia com duas frentes completas:{' '}
-                <strong className="text-slate-900">Brasil Tech Mobile</strong> (iPhones e Androids)
-                e <strong className="text-slate-900">Brasil Tech Gamer</strong> (consoles, jogos e
-                acessórios).
+              <p className="text-xs sm:text-sm text-zinc-600 leading-relaxed">
+                Loja de tecnologia completa:{' '}
+                <strong className="text-zinc-950">Smartphones</strong> (iPhones e Samsung/Android) e{' '}
+                <strong className="text-zinc-950">Videogames</strong> (PlayStation, Xbox, controles
+                e acessórios).
               </p>
               <div className="flex items-center gap-2 pt-1">
                 <a
@@ -1325,16 +1405,16 @@ export default function App() {
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label="WhatsApp Brasil Tech"
-                  className="w-9 h-9 rounded-lg border border-slate-200 bg-slate-50 hover:border-blue-400 text-slate-700 hover:text-blue-600 flex items-center justify-center transition-colors"
+                  className="w-9 h-9 rounded-lg border border-zinc-200 bg-zinc-50 hover:border-lime-500 text-zinc-700 hover:text-zinc-950 flex items-center justify-center transition-colors"
                 >
                   <MessageCircle size={16} />
                 </a>
                 <a
-                  href={`https://www.instagram.com/`}
+                  href="https://www.instagram.com/"
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label="Instagram"
-                  className="w-9 h-9 rounded-lg border border-slate-200 bg-slate-50 hover:border-blue-400 text-slate-700 hover:text-blue-600 flex items-center justify-center transition-colors"
+                  className="w-9 h-9 rounded-lg border border-zinc-200 bg-zinc-50 hover:border-lime-500 text-zinc-700 hover:text-zinc-950 flex items-center justify-center transition-colors"
                 >
                   <Instagram size={16} />
                 </a>
@@ -1347,149 +1427,164 @@ export default function App() {
                     }
                     showToast('Link da loja copiado!');
                   }}
-                  className="w-9 h-9 rounded-lg border border-slate-200 bg-slate-50 hover:border-blue-400 text-slate-700 hover:text-blue-600 flex items-center justify-center transition-colors"
+                  className="w-9 h-9 rounded-lg border border-zinc-200 bg-zinc-50 hover:border-lime-500 text-zinc-700 hover:text-zinc-950 flex items-center justify-center transition-colors"
                 >
                   <Share2 size={16} />
                 </button>
               </div>
             </div>
 
-            <div>
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-900 mb-3">
-                Categorias
-              </h4>
-              <ul className="space-y-2 text-xs sm:text-sm text-slate-600">
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => handleHeaderNavigate('iphones')}
-                    className="hover:text-blue-600 transition-colors"
-                  >
-                    iPhones Selecionados
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => handleHeaderNavigate('android')}
-                    className="hover:text-blue-600 transition-colors"
-                  >
-                    Smartphones Android
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => handleHeaderNavigate('playstation')}
-                    className="hover:text-blue-600 transition-colors"
-                  >
-                    PlayStation (PS2 ao PS5)
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => handleHeaderNavigate('xbox')}
-                    className="hover:text-blue-600 transition-colors"
-                  >
-                    Xbox (360, One e Series)
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => handleHeaderNavigate('acessorios')}
-                    className="hover:text-blue-600 transition-colors"
-                  >
-                    Controles, Jogos e Acessórios
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => handleHeaderNavigate('ofertas')}
-                    className="hover:text-blue-600 transition-colors"
-                  >
-                    Ofertas Especiais
-                  </button>
-                </li>
-              </ul>
-            </div>
+            <div className="grid grid-cols-2 sm:contents gap-6">
+              <div>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-900 mb-3">
+                  Categorias
+                </h4>
+                <ul className="space-y-2 text-xs sm:text-sm text-zinc-600">
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => handleHeaderNavigate('iphones')}
+                      className="hover:text-lime-800 transition-colors text-left"
+                    >
+                      iPhones Selecionados
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => handleHeaderNavigate('android')}
+                      className="hover:text-lime-800 transition-colors text-left"
+                    >
+                      Samsung &amp; Android
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => handleHeaderNavigate('playstation')}
+                      className="hover:text-lime-800 transition-colors text-left"
+                    >
+                      PlayStation (PS2 ao PS5)
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => handleHeaderNavigate('xbox')}
+                      className="hover:text-lime-800 transition-colors text-left"
+                    >
+                      Xbox (360, One e Series)
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => handleHeaderNavigate('acessorios')}
+                      className="hover:text-lime-800 transition-colors text-left"
+                    >
+                      Controles e Acessórios
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => handleHeaderNavigate('ofertas')}
+                      className="hover:text-lime-800 transition-colors text-left font-semibold"
+                    >
+                      Ofertas &amp; Lançamentos
+                    </button>
+                  </li>
+                </ul>
+              </div>
 
-            <div>
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-900 mb-3">
-                Atendimento &amp; Políticas
-              </h4>
-              <ul className="space-y-2 text-xs sm:text-sm text-slate-600">
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => navigateView('security')}
-                    className="hover:text-blue-600 transition-colors"
-                  >
-                    Garantia &amp; Devolução (7 dias)
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => navigateView('security')}
-                    className="hover:text-blue-600 transition-colors"
-                  >
-                    Política de Privacidade (LGPD)
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => navigateView('orders')}
-                    className="hover:text-blue-600 transition-colors"
-                  >
-                    Meus Pedidos e Rastreio
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => navigateView('showcase')}
-                    className="hover:text-blue-600 transition-colors"
-                  >
-                    Central de Pedidos Enviados
-                  </button>
-                </li>
-                <li>
-                  <a
-                    href={waHref}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="hover:text-blue-600 transition-colors"
-                  >
-                    WhatsApp: {storeSettings.phone}
-                  </a>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => navigateView('admin')}
-                    className="hover:text-blue-600 transition-colors"
-                  >
-                    Painel Administrativo
-                  </button>
-                </li>
-              </ul>
+              <div>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-900 mb-3">
+                  Atendimento &amp; Leis
+                </h4>
+                <ul className="space-y-2 text-xs sm:text-sm text-zinc-600">
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => navigateView('security')}
+                      className="hover:text-lime-800 transition-colors text-left"
+                    >
+                      Garantia &amp; Devolução (7 dias)
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => navigateView('security')}
+                      className="hover:text-lime-800 transition-colors text-left"
+                    >
+                      Política de Privacidade (LGPD)
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => navigateView('orders')}
+                      className="hover:text-lime-800 transition-colors text-left"
+                    >
+                      Meus Pedidos e Rastreio
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => navigateView('showcase')}
+                      className="hover:text-lime-800 transition-colors text-left"
+                    >
+                      Central de Pedidos Enviados
+                    </button>
+                  </li>
+                  <li>
+                    <a
+                      href={waHref}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:text-lime-800 transition-colors"
+                    >
+                      WhatsApp: {storeSettings.phone}
+                    </a>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => navigateView('admin')}
+                      className="hover:text-lime-800 transition-colors text-left"
+                    >
+                      Painel Administrativo
+                    </button>
+                  </li>
+                </ul>
+              </div>
             </div>
 
             <div className="space-y-2.5">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-900 mb-3">
-                Dados Comerciais
+              <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-900 mb-3">
+                Dados Comerciais Verificados
               </h4>
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-700 space-y-1.5">
-                <strong className="block text-sm text-slate-950">{storeSettings.storeName}</strong>
-                <span className="block">CNPJ: {storeSettings.cnpj}</span>
-                <span className="block">{storeSettings.address}</span>
-                <span className="block">{storeSettings.email}</span>
+              <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-4 text-xs text-zinc-700 space-y-1.5">
+                <div className="flex items-center gap-1.5 text-emerald-700 font-bold text-[11px]">
+                  <CheckCircle2 size={13} className="shrink-0" />
+                  <span>Empresa Brasileira Regularizada</span>
+                </div>
+                <strong className="block text-sm text-zinc-950">{storeSettings.storeName}</strong>
+                <span className="block tabular-nums">
+                  <b>CNPJ:</b> {storeSettings.cnpj}
+                </span>
+                <span className="block">
+                  <b>Endereço:</b> {storeSettings.address}
+                </span>
+                <span className="block">
+                  <b>SAC / E-mail:</b> {storeSettings.email}
+                </span>
+                <span className="block text-[11px] text-zinc-500 pt-1 border-t border-zinc-200">
+                  Atendimento: Seg a Sáb, 09h às 19h (horário de Brasília)
+                </span>
               </div>
-              <p className="text-[11px] text-slate-500 leading-relaxed">
+              <p className="text-[11px] text-zinc-500 leading-relaxed">
                 Garantia real conforme termo de cada produto e direito de arrependimento em 7 dias
                 (CDC Art. 49).
               </p>
@@ -1498,9 +1593,9 @@ export default function App() {
 
           <FooterTrustSeals cnpj={storeSettings.cnpj} />
 
-          <div className="mt-8 pt-6 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500">
+          <div className="mt-8 pt-6 border-t border-zinc-200 flex flex-col sm:flex-row items-center justify-between gap-2 text-center sm:text-left text-xs text-zinc-500">
             <span>
-              © {new Date().getFullYear()} {storeSettings.storeName} · CNPJ {storeSettings.cnpj}
+              © {new Date().getFullYear()} {storeSettings.storeName} Comércio de Eletrônicos · CNPJ {storeSettings.cnpj}
             </span>
             <span>
               {storeSettings.phone} · {storeSettings.email}
@@ -1512,22 +1607,22 @@ export default function App() {
       {/* Carrinho Lateral */}
       {cartOpen && (
         <div
-          className="fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-[2px] flex justify-end"
+          className="fixed inset-0 z-50 bg-zinc-950/50 backdrop-blur-[2px] flex justify-end"
           id="cartOverlay"
           onClick={(e) => {
             if (e.target === e.currentTarget) setCartOpen(false);
           }}
         >
-          <aside className="w-full max-w-md bg-white h-full flex flex-col shadow-2xl border-l border-slate-200">
-            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-              <h2 className="text-base font-bold text-slate-950">
+          <aside className="w-full max-w-md bg-white h-full flex flex-col shadow-2xl border-l border-zinc-200">
+            <div className="px-5 py-4 border-b border-zinc-200 flex items-center justify-between">
+              <h2 className="text-base font-bold text-zinc-950">
                 Carrinho de Compras ({cartCount})
               </h2>
               <button
                 type="button"
                 aria-label="Fechar carrinho"
                 onClick={() => setCartOpen(false)}
-                className="w-9 h-9 rounded-lg hover:bg-slate-100 text-slate-600 flex items-center justify-center"
+                className="w-9 h-9 rounded-lg hover:bg-zinc-100 text-zinc-600 flex items-center justify-center"
               >
                 <X size={18} />
               </button>
@@ -1536,11 +1631,11 @@ export default function App() {
             <div className="flex-1 overflow-y-auto p-5 space-y-3">
               {cart.length === 0 ? (
                 <div className="py-12 text-center space-y-3">
-                  <Package size={36} className="mx-auto text-slate-300" />
-                  <div className="text-sm font-semibold text-slate-700">
+                  <Package size={36} className="mx-auto text-zinc-300" />
+                  <div className="text-sm font-semibold text-zinc-700">
                     Seu carrinho está vazio.
                   </div>
-                  <p className="text-xs text-slate-500">
+                  <p className="text-xs text-zinc-500">
                     Explore iPhones, Androids, consoles e acessórios e adicione seus favoritos.
                   </p>
                 </div>
@@ -1551,12 +1646,12 @@ export default function App() {
                   return (
                     <div
                       key={entry.id}
-                      className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-white"
+                      className="flex items-center gap-3 p-3 rounded-xl border border-zinc-200 bg-white"
                     >
                       <button
                         type="button"
                         onClick={() => openProduct(p.id)}
-                        className="w-16 h-16 rounded-lg bg-slate-50 border border-slate-100 p-1.5 flex items-center justify-center shrink-0"
+                        className="w-16 h-16 rounded-lg bg-zinc-50 border border-zinc-100 p-1.5 flex items-center justify-center shrink-0"
                       >
                         {p.image && !failedImages.has(p.id) ? (
                           <img
@@ -1576,19 +1671,19 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => openProduct(p.id)}
-                          className="text-xs font-semibold text-slate-900 hover:text-blue-600 text-left line-clamp-2"
+                          className="text-xs font-semibold text-zinc-900 hover:text-lime-700 text-left line-clamp-2"
                         >
                           {p.name}
                         </button>
-                        <div className="text-xs font-bold text-slate-950 mt-0.5 tabular-nums">
+                        <div className="text-xs font-bold text-zinc-950 mt-0.5 tabular-nums">
                           {money(p.price * entry.qty)}
                         </div>
                         <div className="flex items-center gap-2 mt-2">
-                          <div className="inline-flex items-center border border-slate-200 rounded-lg bg-slate-50">
+                          <div className="inline-flex items-center border border-zinc-200 rounded-lg bg-zinc-50">
                             <button
                               type="button"
                               onClick={() => changeQty(p.id, -1)}
-                              className="w-7 h-7 text-xs font-bold text-slate-700 hover:bg-slate-200 rounded-l-lg"
+                              className="w-7 h-7 text-xs font-bold text-zinc-700 hover:bg-zinc-200 rounded-l-lg"
                             >
                               −
                             </button>
@@ -1598,7 +1693,7 @@ export default function App() {
                             <button
                               type="button"
                               onClick={() => changeQty(p.id, 1)}
-                              className="w-7 h-7 text-xs font-bold text-slate-700 hover:bg-slate-200 rounded-r-lg"
+                              className="w-7 h-7 text-xs font-bold text-zinc-700 hover:bg-zinc-200 rounded-r-lg"
                             >
                               +
                             </button>
@@ -1619,10 +1714,10 @@ export default function App() {
               )}
             </div>
 
-            <div className="p-5 border-t border-slate-200 bg-slate-50 space-y-3">
+            <div className="p-5 border-t border-zinc-200 bg-zinc-50 space-y-3">
               <div className="flex items-center justify-between text-sm">
-                <span className="text-slate-600 font-medium">Subtotal</span>
-                <span className="text-lg font-bold text-slate-950 tabular-nums">
+                <span className="text-zinc-600 font-medium">Subtotal</span>
+                <span className="text-lg font-extrabold text-zinc-950 tabular-nums">
                   {money(cartTotal)}
                 </span>
               </div>
@@ -1644,11 +1739,11 @@ export default function App() {
                   setCartOpen(false);
                   navigateView('checkout');
                 }}
-                className="w-full min-h-[46px] rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors"
+                className="w-full min-h-[46px] rounded-xl bg-lime-400 hover:bg-lime-500 text-zinc-950 text-sm font-extrabold transition-colors"
               >
                 Finalizar Compra →
               </button>
-              <p className="text-[11px] text-slate-500 text-center">
+              <p className="text-[11px] text-zinc-500 text-center">
                 Frete expresso ({money(storeSettings.expressShippingPrice)}) ou padrão (
                 {money(storeSettings.standardShippingPrice)}) calculado no checkout.
               </p>
@@ -1660,22 +1755,22 @@ export default function App() {
       {/* Modal Conta do Cliente / Admin */}
       {loginOpen && (
         <div
-          className="fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-[2px] flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-zinc-950/50 backdrop-blur-[2px] flex items-center justify-center p-4"
           id="loginModal"
           onClick={(e) => {
             if (e.target === e.currentTarget) setLoginOpen(false);
           }}
         >
-          <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl p-6 shadow-xl">
+          <div className="w-full max-w-md bg-white border border-zinc-200 rounded-2xl p-6 shadow-xl">
             <div className="flex items-center justify-between gap-3 mb-4">
-              <h2 className="text-lg font-bold text-slate-950">
+              <h2 className="text-lg font-bold text-zinc-950">
                 {currentUser || sessionAdminVerified ? `Olá, ${userName}` : 'Entrar na sua conta'}
               </h2>
               <button
                 type="button"
                 onClick={() => setLoginOpen(false)}
                 aria-label="Fechar modal"
-                className="w-9 h-9 rounded-lg hover:bg-slate-100 text-slate-600 flex items-center justify-center"
+                className="w-9 h-9 rounded-lg hover:bg-zinc-100 text-zinc-600 flex items-center justify-center"
               >
                 <X size={18} />
               </button>
@@ -1683,7 +1778,7 @@ export default function App() {
 
             {currentUser || sessionAdminVerified ? (
               <div className="space-y-3">
-                <div className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-zinc-50 border border-zinc-200">
                   {currentUser?.photoURL && (
                     <img
                       src={currentUser.photoURL}
@@ -1693,8 +1788,8 @@ export default function App() {
                     />
                   )}
                   <div className="min-w-0">
-                    <div className="text-sm font-bold text-slate-950 truncate">{userName}</div>
-                    <div className="text-xs text-slate-500 truncate">
+                    <div className="text-sm font-bold text-zinc-950 truncate">{userName}</div>
+                    <div className="text-xs text-zinc-500 truncate">
                       {currentUser?.email ||
                         (sessionAdminVerified ? PRIMARY_ADMIN_LOGIN_EMAIL : '')}
                     </div>
@@ -1707,7 +1802,7 @@ export default function App() {
                     setLoginOpen(false);
                     navigateView('orders');
                   }}
-                  className="w-full min-h-[44px] rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-semibold"
+                  className="w-full min-h-[44px] rounded-xl bg-lime-400 hover:bg-lime-500 text-zinc-950 text-xs sm:text-sm font-extrabold"
                 >
                   Meus Pedidos e Rastreamento ({orders.length})
                 </button>
@@ -1719,7 +1814,7 @@ export default function App() {
                       setLoginOpen(false);
                       navigateView('admin');
                     }}
-                    className="w-full min-h-[44px] rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold"
+                    className="w-full min-h-[44px] rounded-xl bg-zinc-950 hover:bg-zinc-800 text-white text-xs sm:text-sm font-semibold"
                   >
                     Abrir Painel Administrativo
                   </button>
@@ -1728,14 +1823,14 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleSignOut}
-                  className="w-full min-h-[42px] rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700"
+                  className="w-full min-h-[42px] rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 text-xs font-semibold text-zinc-700"
                 >
                   Sair da conta
                 </button>
               </div>
             ) : (
               <div className="space-y-4">
-                <p className="text-xs sm:text-sm text-slate-600">
+                <p className="text-xs sm:text-sm text-zinc-600">
                   Conecte sua conta Google para acompanhar pedidos, rastreamento ao vivo e enviar
                   avaliações.
                 </p>
@@ -1743,16 +1838,16 @@ export default function App() {
                   type="button"
                   disabled={authLoading}
                   onClick={handleGoogleSignIn}
-                  className="w-full min-h-[44px] rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-900 text-sm font-semibold flex items-center justify-center gap-2.5 shadow-sm"
+                  className="w-full min-h-[44px] rounded-xl border border-zinc-300 bg-white hover:bg-zinc-50 text-zinc-900 text-sm font-semibold flex items-center justify-center gap-2.5 shadow-sm"
                 >
-                  <span className="font-bold text-blue-600">G</span>
+                  <span className="font-bold text-lime-700">G</span>
                   <span>{authLoading ? 'Conectando...' : 'Entrar com Google'}</span>
                 </button>
 
-                <div className="flex items-center gap-3 text-[11px] text-slate-400">
-                  <span className="flex-1 h-px bg-slate-200" />
+                <div className="flex items-center gap-3 text-[11px] text-zinc-400">
+                  <span className="flex-1 h-px bg-zinc-200" />
                   <span>Acesso Administrativo</span>
-                  <span className="flex-1 h-px bg-slate-200" />
+                  <span className="flex-1 h-px bg-zinc-200" />
                 </div>
 
                 <form className="space-y-2.5" onSubmit={handleAdminPasswordLogin}>
@@ -1762,7 +1857,7 @@ export default function App() {
                     value={adminEmailInput}
                     onChange={(e) => setAdminEmailInput(e.target.value)}
                     required
-                    className="w-full min-h-[42px] px-3 rounded-lg border border-slate-300 text-sm"
+                    className="w-full min-h-[42px] px-3 rounded-lg border border-zinc-300 text-sm"
                   />
                   <input
                     type="password"
@@ -1770,7 +1865,7 @@ export default function App() {
                     value={adminPassInput}
                     onChange={(e) => setAdminPassInput(e.target.value)}
                     required
-                    className="w-full min-h-[42px] px-3 rounded-lg border border-slate-300 text-sm"
+                    className="w-full min-h-[42px] px-3 rounded-lg border border-zinc-300 text-sm"
                   />
                   {adminAuthError && (
                     <div className="p-2 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-700">
@@ -1780,7 +1875,7 @@ export default function App() {
                   <button
                     type="submit"
                     disabled={authLoading}
-                    className="w-full min-h-[44px] rounded-xl bg-slate-900 hover:bg-blue-600 text-white text-xs sm:text-sm font-semibold flex items-center justify-center gap-2"
+                    className="w-full min-h-[44px] rounded-xl bg-zinc-950 hover:bg-lime-400 hover:text-zinc-950 text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-colors"
                   >
                     <Lock size={14} />
                     <span>{authLoading ? 'Entrando...' : 'Entrar no Painel Admin'}</span>
@@ -1795,24 +1890,24 @@ export default function App() {
       {/* Modal de CEP */}
       {cepModalOpen && (
         <div
-          className="fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-[2px] flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-zinc-950/50 backdrop-blur-[2px] flex items-center justify-center p-4"
           onClick={(e) => {
             if (e.target === e.currentTarget) setCepModalOpen(false);
           }}
         >
-          <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl p-6 shadow-xl">
+          <div className="w-full max-w-md bg-white border border-zinc-200 rounded-2xl p-6 shadow-xl">
             <div className="flex items-center justify-between gap-3 mb-3">
-              <h2 className="text-lg font-bold text-slate-950">Onde você quer receber?</h2>
+              <h2 className="text-lg font-bold text-zinc-950">Onde você quer receber?</h2>
               <button
                 type="button"
                 onClick={() => setCepModalOpen(false)}
                 aria-label="Fechar"
-                className="w-9 h-9 rounded-lg hover:bg-slate-100 text-slate-600 flex items-center justify-center"
+                className="w-9 h-9 rounded-lg hover:bg-zinc-100 text-zinc-600 flex items-center justify-center"
               >
                 <X size={18} />
               </button>
             </div>
-            <p className="text-xs sm:text-sm text-slate-600 mb-4">
+            <p className="text-xs sm:text-sm text-zinc-600 mb-4">
               Informe seu CEP para exibir opções de entrega expressa (
               {money(storeSettings.expressShippingPrice)}) e padrão (
               {money(storeSettings.standardShippingPrice)}).
@@ -1838,11 +1933,11 @@ export default function App() {
                 value={cepDraft}
                 onChange={(e) => setCepDraft(e.target.value)}
                 required
-                className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-300 text-sm"
+                className="w-full min-h-[44px] px-3.5 rounded-xl border border-zinc-300 text-sm"
               />
               <button
                 type="submit"
-                className="w-full min-h-[44px] rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold"
+                className="w-full min-h-[44px] rounded-xl bg-lime-400 hover:bg-lime-500 text-zinc-950 text-sm font-extrabold"
               >
                 Confirmar CEP
               </button>
@@ -1851,7 +1946,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Botão Flutuante WhatsApp (oculto em telas móveis nas rotas checkout/produto/admin) */}
+      {/* Botão Flutuante WhatsApp */}
       <a
         href={waHref}
         target="_blank"
@@ -1870,9 +1965,9 @@ export default function App() {
         <div
           id="toast"
           role="status"
-          className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[60] max-w-[92vw] px-4 py-2.5 rounded-xl bg-slate-950 text-white text-xs sm:text-sm font-medium shadow-xl flex items-center gap-2"
+          className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[60] max-w-[92vw] px-4 py-2.5 rounded-xl bg-zinc-950 text-white text-xs sm:text-sm font-medium shadow-xl flex items-center gap-2"
         >
-          <CheckCircle2 size={16} className="text-blue-400 shrink-0" />
+          <CheckCircle2 size={16} className="text-lime-400 shrink-0" />
           <span>{toastMsg}</span>
         </div>
       )}

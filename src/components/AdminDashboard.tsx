@@ -23,6 +23,8 @@ import {
   ReviewStatus,
   StoreSettings,
   StorefrontContentState,
+  TRACKING_STAGE_DESCRIPTIONS,
+  TRACKING_STAGE_LABELS,
   addAdminUser,
   adjustProductStockAdmin,
   answerQuestionAdmin,
@@ -40,6 +42,7 @@ import {
   isValidTrackingCodeFormat,
   moderateReviewAdmin,
   normalizeWhatsAppDigits,
+  probeBackendApiAvailable,
   removeAdminUser,
   sanitizeTrackingCodeForAdmin,
   saveCouponAdmin,
@@ -55,6 +58,10 @@ import {
 } from '../services/firestoreStore';
 import { LiveTrackingMap } from './LiveTrackingMap';
 import { TrackingDocumentsModal } from './TrackingDocumentsModal';
+import {
+  downloadDanfePdf,
+  downloadShippingLabelPdf,
+} from '../lib/trackingPdfGenerator';
 
 type AdminTab =
   | 'overview'
@@ -77,19 +84,14 @@ interface AdminDashboardProps {
   storefrontContent?: StorefrontContentState;
   adminEmail: string;
   isBootstrappedAdmin: boolean;
+  onConnectGoogleAdmin?: () => void;
   onAdminLogout?: () => void;
   onBackToStore: () => void;
   onOpenOrdersShowcase?: () => void;
   onNotify: (msg: string) => void;
 }
 
-const STATUS_LABELS = [
-  'Pedido confirmado',
-  'Em separação e testes',
-  'Em transporte',
-  'Saiu para entrega',
-  'Entregue',
-];
+const STATUS_LABELS = [...TRACKING_STAGE_LABELS];
 
 export function AdminDashboard({
   products,
@@ -102,6 +104,7 @@ export function AdminDashboard({
   storefrontContent = DEFAULT_STOREFRONT_CONTENT,
   adminEmail,
   isBootstrappedAdmin,
+  onConnectGoogleAdmin,
   onAdminLogout,
   onBackToStore,
   onOpenOrdersShowcase,
@@ -109,6 +112,7 @@ export function AdminDashboard({
 }: AdminDashboardProps) {
   const [tab, setTab] = useState<AdminTab>('overview');
   const [busy, setBusy] = useState<boolean>(false);
+  const [backendApiOnline, setBackendApiOnline] = useState<boolean | null>(null);
 
   // Filters
   const [productQuery, setProductQuery] = useState('');
@@ -129,6 +133,16 @@ export function AdminDashboard({
   const [trackingRulesWarning, setTrackingRulesWarning] = useState(false);
 
   useEffect(() => {
+    let active = true;
+    probeBackendApiAvailable().then((ok) => {
+      if (active) setBackendApiOnline(ok);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     const unsubTrackings = subscribeTrackingsAdmin(
       (items) => {
         setTrackingRulesWarning(false);
@@ -136,11 +150,6 @@ export function AdminDashboard({
       },
       () => setTrackingRulesWarning(true)
     );
-    if (!isBootstrappedAdmin) {
-      return () => {
-        unsubTrackings();
-      };
-    }
     const unsubUsers = subscribeUsersAdmin(setCustomers);
     const unsubNews = subscribeNewsletterAdmin(setNewsletterList);
     const unsubAdmins = subscribeAdminsAdmin(setAdminUsers);
@@ -150,7 +159,7 @@ export function AdminDashboard({
       unsubNews();
       unsubAdmins();
     };
-  }, [isBootstrappedAdmin]);
+  }, [isBootstrappedAdmin, adminEmail]);
 
   // Product modal state
   const [editingProduct, setEditingProduct] = useState<MarketplaceProduct | null>(null);
@@ -230,10 +239,14 @@ export function AdminDashboard({
   const [tWeightKg, setTWeightKg] = useState('1.4');
   const [tShipping, setTShipping] = useState('Correios SEDEX • Brasil Tech Express');
   const [tStep, setTStep] = useState<number>(2);
-  const [tNote, setTNote] = useState('Objeto postado e em encaminhamento no fluxo logístico');
+  const [tNote, setTNote] = useState<string>(TRACKING_STAGE_DESCRIPTIONS[2]);
   const [tActive, setTActive] = useState<boolean>(true);
   const [lastSavedTrackingForActions, setLastSavedTrackingForActions] =
     useState<PersistedTracking | null>(null);
+  const [trackingFormFeedback, setTrackingFormFeedback] = useState<{
+    type: 'ok' | 'err';
+    text: string;
+  } | null>(null);
   const [docModalState, setDocModalState] = useState<{
     tracking: PersistedTracking;
     tab: 'nfe' | 'label';
@@ -692,13 +705,14 @@ export function AdminDashboard({
     }
   };
 
-  const generateSuggestedTrackingCode = () => {
+  const generateSuggestedTrackingCode = (): string => {
     const digits = Math.floor(1000000 + Math.random() * 8999999);
     const code = `BT${digits}BR`;
     setTCode(code);
     if (!tInvoiceNumber) {
       setTInvoiceNumber(`00${String(digits).slice(0, 4)}`);
     }
+    return code;
   };
 
   const handleTrackingCepChange = async (raw: string) => {
@@ -779,40 +793,105 @@ export function AdminDashboard({
     onNotify(`Carregado ${item.code} no editor acima para edição.`);
   };
 
+  const syncSavedTrackingIntoState = (saved: PersistedTracking) => {
+    setTrackings((prev) => [saved, ...prev.filter((item) => item.code !== saved.code)]);
+    setTrackingDrafts((prev) => ({
+      ...prev,
+      [saved.code]: {
+        statusStep: saved.statusStep,
+        statusNote: saved.statusNote,
+        shippingLabel: saved.shippingLabel,
+        originCityState: saved.originCityState || 'Curitiba - PR',
+        destinationCityState: saved.destinationCityState || saved.cityState,
+        currentLocation: saved.currentLocation || saved.originCityState || 'Curitiba - PR',
+        routeProgress: saved.routeProgress ?? defaultProgressFromStep(saved.statusStep),
+        active: saved.active,
+      },
+    }));
+    setLastSavedTrackingForActions(saved);
+  };
+
+  const applyTrackingStepSelection = (nextStep: number, updateProgress = true) => {
+    const clamped = Math.min(4, Math.max(0, Math.round(nextStep)));
+    setTStep(clamped);
+    if (updateProgress) {
+      setTRouteProgress(defaultProgressFromStep(clamped));
+    }
+    const isStandardNote =
+      !tNote.trim() ||
+      TRACKING_STAGE_DESCRIPTIONS.includes(
+        tNote.trim() as (typeof TRACKING_STAGE_DESCRIPTIONS)[number]
+      ) ||
+      tNote.trim() === 'Objeto postado e em encaminhamento no fluxo logístico';
+    if (isStandardNote) {
+      setTNote(TRACKING_STAGE_DESCRIPTIONS[clamped] || TRACKING_STAGE_LABELS[clamped]);
+    }
+  };
+
   const handleCreateTracking = async (e: FormEvent) => {
     e.preventDefault();
-    const cleanCode = sanitizeTrackingCodeForAdmin(tCode);
+    setTrackingFormFeedback(null);
+    let cleanCode = sanitizeTrackingCodeForAdmin(tCode);
+    if (!cleanCode) {
+      cleanCode = generateSuggestedTrackingCode();
+    }
     if (!isValidTrackingCodeFormat(cleanCode)) {
-      onNotify('Informe um código válido (mínimo 3 letras/números, ex: BT849201BR).');
+      const msg = 'Informe um código válido (mínimo 3 letras/números, ex: BT849201BR).';
+      setTrackingFormFeedback({ type: 'err', text: msg });
+      onNotify(msg);
       return;
     }
-    if (!tCustomer.trim() || !tProduct.trim() || !tCity.trim()) {
-      onNotify('Preencha cliente, produto(s) e destino (Cidade - UF) para criar o rastreio.');
+
+    const customerName = tCustomer.trim();
+    const productName = tProduct.trim();
+    const destination = tCity.trim();
+    if (!customerName || !productName || !destination) {
+      const msg = 'Preencha Nome do cliente, Produto(s) e Destino (Cidade - UF) para gerar o rastreio.';
+      setTrackingFormFeedback({ type: 'err', text: msg });
+      onNotify(msg);
       return;
     }
+
+    const ensuredInvoice =
+      tInvoiceNumber.trim() || `00${String(Math.floor(1000 + Math.random() * 8999))}`;
+    if (!tInvoiceNumber.trim()) {
+      setTInvoiceNumber(ensuredInvoice);
+    }
+
+    const parseBrDecimalInput = (raw: string, fallback: number): number => {
+      const cleaned = raw.trim().replace(/R\$/gi, '').replace(/\s+/g, '');
+      if (!cleaned) return fallback;
+      const normalized =
+        cleaned.includes(',') && cleaned.includes('.')
+          ? cleaned.replace(/\./g, '').replace(',', '.')
+          : cleaned.replace(',', '.');
+      const num = Number(normalized);
+      return Number.isFinite(num) ? num : fallback;
+    };
 
     setBusy(true);
     try {
       const saved = await upsertTrackingAdmin({
         code: cleanCode,
-        orderCode: tOrderCode.trim(),
-        customerLabel: tCustomer.trim(),
-        customerCpf: tCustomerCpf.trim(),
+        orderCode: tOrderCode.trim() || `BT-${cleanCode.slice(-5)}`,
+        customerLabel: customerName,
+        customerCpf: tCustomerCpf.trim() || 'Não informado',
         customerPhone: tCustomerPhone.trim(),
-        customerAddress: tCustomerAddress.trim(),
+        customerAddress: tCustomerAddress.trim() || destination,
         customerCep: tCustomerCep.trim(),
-        productSummary: tProduct.trim(),
-        cityState: tCity.trim(),
+        productSummary: productName,
+        cityState: destination,
         originCityState: tOrigin.trim() || 'Curitiba - PR',
-        destinationCityState: tCity.trim(),
+        destinationCityState: destination,
         currentLocation: tCurrentLocation.trim() || tOrigin.trim() || 'Curitiba - PR',
         routeProgress: tRouteProgress,
-        invoiceNumber: tInvoiceNumber.trim(),
-        orderTotal: Number(tOrderTotal) || 0,
-        weightKg: Number(tWeightKg) || 1.2,
+        invoiceNumber: ensuredInvoice,
+        orderTotal: Math.max(0, parseBrDecimalInput(tOrderTotal, 0)),
+        weightKg: Math.max(0.1, parseBrDecimalInput(tWeightKg, 1.2)),
         shippingLabel: tShipping.trim() || 'Correios SEDEX • Brasil Tech Express',
         statusStep: tStep,
-        statusNote: tNote.trim(),
+        statusNote:
+          tNote.trim() || TRACKING_STAGE_DESCRIPTIONS[tStep] || STATUS_LABELS[tStep] || 'Pedido em logística',
         active: tActive,
       });
 
@@ -828,14 +907,15 @@ export function AdminDashboard({
       }
 
       setTrackingRulesWarning(false);
-      setLastSavedTrackingForActions(saved);
-      onNotify(
-        saved.active
-          ? `Rastreio ${cleanCode} salvo e liberado ao vivo para o cliente!`
-          : `Rastreio ${cleanCode} salvo como oculto (clientes não visualizam enquanto estiver desmarcado).`
-      );
+      syncSavedTrackingIntoState(saved);
+      const okMsg = saved.active
+        ? `Rastreio ${cleanCode} gerado e salvo ao vivo! NF-e e Etiqueta PDF prontas abaixo.`
+        : `Rastreio ${cleanCode} salvo como oculto.`;
+      setTrackingFormFeedback({ type: 'ok', text: okMsg });
+      onNotify(okMsg);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Erro ao salvar rastreio no servidor.';
+      setTrackingFormFeedback({ type: 'err', text: msg });
       onNotify(msg);
     } finally {
       setBusy(false);
@@ -906,6 +986,24 @@ export function AdminDashboard({
           </button>
         </div>
       </div>
+
+      {backendApiOnline === false && !isBootstrappedAdmin && (
+        <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <strong>Hospedagem estática detectada (sem servidor /api ativo aqui):</strong>{' '}
+            Para criar rastreios, editar produtos e sincronizar tudo na nuvem Firebase para todos os clientes, conecte sua conta Google Admin.
+          </div>
+          {onConnectGoogleAdmin && (
+            <button
+              type="button"
+              onClick={onConnectGoogleAdmin}
+              className="rounded-lg bg-zinc-950 hover:bg-lime-500 hover:text-zinc-950 text-white px-3.5 py-2 text-xs font-semibold transition-colors"
+            >
+              🔐 Conectar Google Admin (Firebase)
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="admin-tabs">
         <button
@@ -1777,24 +1875,22 @@ export function AdminDashboard({
                           className="admin-mini-btn approve"
                           disabled={busy}
                           onClick={async () => {
-                            const cleanCode = sanitizeTrackingCodeForAdmin(draft.trackingCode);
+                            let cleanCode = sanitizeTrackingCodeForAdmin(draft.trackingCode);
                             if (
                               !isValidTrackingCodeFormat(cleanCode) ||
                               cleanCode === 'AGUARDANDO-POSTAGEM' ||
                               cleanCode === 'AGUARDANDO-ENVIO'
                             ) {
-                              onNotify(
-                                'Digite um código de rastreio válido (ex: BT849201BR) antes de publicar.'
-                              );
-                              return;
+                              const digits = Math.floor(1000000 + Math.random() * 8999999);
+                              cleanCode = `BT${digits}BR`;
+                              setOrderDrafts((prev) => ({
+                                ...prev,
+                                [order.code]: { ...draft, trackingCode: cleanCode },
+                              }));
                             }
                             setBusy(true);
                             try {
-                              await updateOrderAdmin(order.code, {
-                                ...draft,
-                                trackingCode: cleanCode,
-                              });
-                              await upsertTrackingAdmin({
+                              const saved = await upsertTrackingAdmin({
                                 code: cleanCode,
                                 orderCode: order.code,
                                 customerLabel: order.customerName,
@@ -1808,28 +1904,80 @@ export function AdminDashboard({
                                     .map((it) => `${it.qty}x ${it.name}`)
                                     .join(', ')
                                     .slice(0, 240) || `Pedido ${order.code}`,
-                                cityState: order.cityState,
+                                cityState: order.cityState || 'São Paulo - SP',
                                 shippingLabel: order.shippingLabel || 'Entrega Padrão Brasil Tech',
                                 statusStep: draft.statusStep,
                                 statusNote:
                                   STATUS_LABELS[draft.statusStep] || 'Objeto em acompanhamento',
                                 active: true,
                               });
+                              await updateOrderAdmin(order.code, {
+                                ...draft,
+                                trackingCode: cleanCode,
+                              }).catch(() => undefined);
+                              syncSavedTrackingIntoState(saved);
                               onNotify(
-                                `Rastreio ${cleanCode} liberado ao vivo para consulta do cliente!`
+                                `Rastreio ${cleanCode} gerado e liberado ao vivo! NF-e e Etiqueta prontas.`
                               );
                             } catch (err) {
                               const msg =
                                 err instanceof Error
                                   ? err.message
-                                  : 'Não foi possível publicar o rastreio no servidor.';
+                                  : 'Não foi possível gerar o rastreio no servidor.';
                               onNotify(msg);
                             } finally {
                               setBusy(false);
                             }
                           }}
                         >
-                          📍 Publicar Rastreio
+                          📍 Gerar / Liberar Rastreio
+                        </button>
+                        <button
+                          type="button"
+                          className="admin-mini-btn"
+                          onClick={() => {
+                            const existingTrk = trackings.find(
+                              (t) =>
+                                t.orderCode.toUpperCase() === order.code.toUpperCase() ||
+                                t.code.toUpperCase() === draft.trackingCode.toUpperCase()
+                            );
+                            const docTarget: PersistedTracking = existingTrk || {
+                              code:
+                                isValidTrackingCodeFormat(
+                                  sanitizeTrackingCodeForAdmin(draft.trackingCode)
+                                ) &&
+                                draft.trackingCode !== 'AGUARDANDO-POSTAGEM' &&
+                                draft.trackingCode !== 'AGUARDANDO-ENVIO'
+                                  ? sanitizeTrackingCodeForAdmin(draft.trackingCode)
+                                  : `BT${order.code.replace(/[^A-Z0-9]/g, '').slice(-6)}BR`,
+                              orderCode: order.code,
+                              customerLabel: order.customerName,
+                              customerCpf: order.customerCpf,
+                              customerPhone: order.customerPhone,
+                              customerAddress: order.address,
+                              customerCep: order.cep,
+                              productSummary:
+                                order.items.map((it) => `${it.qty}x ${it.name}`).join(', ') ||
+                                `Pedido ${order.code}`,
+                              cityState: order.cityState,
+                              originCityState: 'Curitiba - PR',
+                              destinationCityState: order.cityState,
+                              currentLocation: 'Curitiba - PR',
+                              routeProgress: defaultProgressFromStep(draft.statusStep),
+                              invoiceNumber: order.code.replace(/\D/g, '').slice(-6) || '001482',
+                              orderTotal: order.total,
+                              weightKg: 1.2,
+                              shippingLabel: order.shippingLabel,
+                              statusStep: draft.statusStep,
+                              statusNote: STATUS_LABELS[draft.statusStep] || 'Em transporte',
+                              active: true,
+                              createdAtLabel: order.createdAt,
+                              updatedAtLabel: order.createdAt,
+                            };
+                            setDocModalState({ tracking: docTarget, tab: 'nfe' });
+                          }}
+                        >
+                          🧾 NF-e / Etiqueta PDF
                         </button>
                         <button
                           type="button"
@@ -1893,13 +2041,23 @@ export function AdminDashboard({
 
       {tab === 'trackings' && (
         <div className="admin-panel" style={{ display: 'grid', gap: 14 }}>
-          {trackingRulesWarning && (
+          {trackingRulesWarning && !isBootstrappedAdmin && backendApiOnline !== true && (
             <div className="tracking-not-found-box">
-              <strong>Atenção: sessão administrativa não sincronizada</strong>
+              <strong>Atenção: conecte sua nuvem ou faça login novamente</strong>
               <p>
-                Não foi possível carregar os rastreios do servidor. Saia e entre novamente no
-                Painel Admin para liberar a sincronização global.
+                {backendApiOnline === false
+                  ? 'Este domínio está em hospedagem estática (Netlify) sem servidor Node (/api). Conecte sua conta Google Admin abaixo para salvar e liberar rastreios no Firebase para seus clientes.'
+                  : 'Não foi possível carregar os rastreios do servidor. Conecte sua conta Google Admin ou saia e entre novamente no Painel Admin.'}
               </p>
+              {onConnectGoogleAdmin && (
+                <button
+                  type="button"
+                  onClick={onConnectGoogleAdmin}
+                  className="mt-2 rounded-lg bg-zinc-950 hover:bg-lime-500 hover:text-zinc-950 text-white px-3.5 py-2 text-xs font-semibold transition-colors"
+                >
+                  🔐 Conectar Google Admin (Firebase)
+                </button>
+              )}
             </div>
           )}
 
@@ -1952,17 +2110,16 @@ export function AdminDashboard({
                 </label>
               )}
 
-              <form className="admin-prod-form" onSubmit={handleCreateTracking}>
+              <form className="admin-prod-form" onSubmit={handleCreateTracking} noValidate>
                 <div className="form-grid-2">
                   <label>
-                    Código de rastreio exato *
+                    Código de rastreio * (deixe em branco p/ gerar automático)
                     <div style={{ display: 'flex', gap: 8 }}>
                       <input
                         style={{ flex: 1, fontWeight: 800, letterSpacing: '0.5px' }}
                         placeholder="Ex: BT849201BR"
                         value={tCode}
                         onChange={(e) => setTCode(sanitizeTrackingCodeForAdmin(e.target.value))}
-                        required
                       />
                       <button
                         type="button"
@@ -1994,24 +2151,22 @@ export function AdminDashboard({
                     />
                   </label>
                   <label>
-                    CPF do cliente *
+                    CPF do cliente (opcional p/ NF-e)
                     <input
                       placeholder="000.000.000-00"
                       value={tCustomerCpf}
                       onChange={(e) => setTCustomerCpf(formatCpfMask(e.target.value))}
-                      required
                     />
                   </label>
                 </div>
 
                 <div className="form-grid-2">
                   <label>
-                    Telefone / WhatsApp do cliente *
+                    Telefone / WhatsApp (opcional)
                     <input
                       placeholder="(41) 99999-9999"
                       value={tCustomerPhone}
                       onChange={(e) => setTCustomerPhone(formatPhoneMask(e.target.value))}
-                      required
                     />
                   </label>
                   <label>
@@ -2035,12 +2190,11 @@ export function AdminDashboard({
 
                 <div className="form-grid-2">
                   <label>
-                    De onde está saindo (Origem) *
+                    De onde está saindo (Origem)
                     <input
                       placeholder="Ex: Curitiba - PR"
                       value={tOrigin}
                       onChange={(e) => setTOrigin(e.target.value)}
-                      required
                     />
                   </label>
                   <label>
@@ -2065,10 +2219,11 @@ export function AdminDashboard({
                           className={`admin-mini-btn ${tRouteProgress === pct ? 'active-pill' : ''}`}
                           onClick={() => {
                             setTRouteProgress(pct);
-                            if (pct === 100) setTStep(4);
-                            else if (pct >= 75) setTStep(3);
-                            else if (pct >= 40) setTStep(2);
-                            else if (pct >= 20) setTStep(1);
+                            if (pct === 100) applyTrackingStepSelection(4, false);
+                            else if (pct >= 75) applyTrackingStepSelection(3, false);
+                            else if (pct >= 40) applyTrackingStepSelection(2, false);
+                            else if (pct >= 20) applyTrackingStepSelection(1, false);
+                            else applyTrackingStepSelection(0, false);
                           }}
                         >
                           {pct}%
@@ -2118,9 +2273,9 @@ export function AdminDashboard({
                   <label>
                     Valor NF-e (R$)
                     <input
-                      type="number"
-                      step="0.01"
-                      min="0"
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="1899.00"
                       value={tOrderTotal}
                       onChange={(e) => setTOrderTotal(e.target.value)}
                     />
@@ -2136,9 +2291,9 @@ export function AdminDashboard({
                   <label>
                     Peso (kg)
                     <input
-                      type="number"
-                      step="0.1"
-                      min="0.1"
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="1.2"
                       value={tWeightKg}
                       onChange={(e) => setTWeightKg(e.target.value)}
                     />
@@ -2152,7 +2307,6 @@ export function AdminDashboard({
                       placeholder="Ex: Correios SEDEX / Entrega Expressa"
                       value={tShipping}
                       onChange={(e) => setTShipping(e.target.value)}
-                      required
                     />
                   </label>
                   <label>
@@ -2161,8 +2315,7 @@ export function AdminDashboard({
                       value={tStep}
                       onChange={(e) => {
                         const next = Number(e.target.value);
-                        setTStep(next);
-                        setTRouteProgress(defaultProgressFromStep(next));
+                        applyTrackingStepSelection(next, true);
                       }}
                     >
                       {STATUS_LABELS.map((lbl, idx) => (
@@ -2192,8 +2345,20 @@ export function AdminDashboard({
                   Rastreio ativo para consulta ao vivo do cliente
                 </label>
 
+                {trackingFormFeedback && (
+                  <div
+                    className={`rounded-lg border px-3 py-2 text-xs font-semibold ${
+                      trackingFormFeedback.type === 'ok'
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                        : 'bg-rose-50 border-rose-200 text-rose-800'
+                    }`}
+                  >
+                    {trackingFormFeedback.text}
+                  </div>
+                )}
+
                 <button type="submit" className="primary" disabled={busy}>
-                  {busy ? 'Salvando...' : '📍 Salvar Rastreio Completo'}
+                  {busy ? 'Gerando / Salvando...' : '📍 Gerar e Salvar Rastreio'}
                 </button>
               </form>
 
@@ -2215,9 +2380,32 @@ export function AdminDashboard({
                         target="_blank"
                         rel="noopener noreferrer"
                       >
-                        💬 Enviar no WhatsApp de {lastSavedTrackingForActions.customerLabel}
+                        💬 WhatsApp {lastSavedTrackingForActions.customerLabel}
                       </a>
                     )}
+                    <button
+                      type="button"
+                      className="admin-mini-btn approve"
+                      onClick={() => {
+                        const file = downloadDanfePdf(lastSavedTrackingForActions, storeSettings);
+                        onNotify(`Nota Fiscal baixada: ${file}`);
+                      }}
+                    >
+                      ⬇️ Baixar NF-e PDF
+                    </button>
+                    <button
+                      type="button"
+                      className="admin-mini-btn approve"
+                      onClick={() => {
+                        const file = downloadShippingLabelPdf(
+                          lastSavedTrackingForActions,
+                          storeSettings
+                        );
+                        onNotify(`Etiqueta baixada: ${file}`);
+                      }}
+                    >
+                      ⬇️ Baixar Etiqueta PDF
+                    </button>
                     <button
                       type="button"
                       className="admin-mini-btn"
@@ -2225,7 +2413,7 @@ export function AdminDashboard({
                         setDocModalState({ tracking: lastSavedTrackingForActions, tab: 'nfe' })
                       }
                     >
-                      🧾 Gerar Nota Fiscal
+                      🧾 Visualizar NF-e
                     </button>
                     <button
                       type="button"
@@ -2234,7 +2422,7 @@ export function AdminDashboard({
                         setDocModalState({ tracking: lastSavedTrackingForActions, tab: 'label' })
                       }
                     >
-                      🏷️ Gerar Etiqueta de Envio
+                      🏷️ Visualizar Etiqueta
                     </button>
                   </div>
                 </div>
@@ -2451,14 +2639,34 @@ export function AdminDashboard({
                             target="_blank"
                             rel="noopener noreferrer"
                           >
-                            💬 Enviar WhatsApp {waDigits ? `(${item.customerPhone})` : ''}
+                            💬 WhatsApp {waDigits ? `(${item.customerPhone})` : ''}
                           </a>
+                          <button
+                            type="button"
+                            className="admin-mini-btn approve"
+                            onClick={() => {
+                              const file = downloadDanfePdf(previewTracking, storeSettings);
+                              onNotify(`Nota Fiscal baixada: ${file}`);
+                            }}
+                          >
+                            ⬇️ Baixar NF-e PDF
+                          </button>
+                          <button
+                            type="button"
+                            className="admin-mini-btn approve"
+                            onClick={() => {
+                              const file = downloadShippingLabelPdf(previewTracking, storeSettings);
+                              onNotify(`Etiqueta baixada: ${file}`);
+                            }}
+                          >
+                            ⬇️ Baixar Etiqueta PDF
+                          </button>
                           <button
                             type="button"
                             className="admin-mini-btn"
                             onClick={() => setDocModalState({ tracking: previewTracking, tab: 'nfe' })}
                           >
-                            🧾 Nota Fiscal
+                            🧾 Ver DANFE
                           </button>
                           <button
                             type="button"
@@ -2467,7 +2675,7 @@ export function AdminDashboard({
                               setDocModalState({ tracking: previewTracking, tab: 'label' })
                             }
                           >
-                            🏷️ Etiqueta
+                            🏷️ Ver Etiqueta
                           </button>
                         </div>
 
@@ -2493,7 +2701,12 @@ export function AdminDashboard({
                               onClick={async () => {
                                 setBusy(true);
                                 try {
-                                  await upsertTrackingAdmin({
+                                  const destCity =
+                                    draft.destinationCityState.trim() ||
+                                    item.destinationCityState ||
+                                    item.cityState ||
+                                    'São Paulo - SP';
+                                  const saved = await upsertTrackingAdmin({
                                     code: item.code,
                                     orderCode: item.orderCode,
                                     customerLabel: item.customerLabel,
@@ -2502,22 +2715,33 @@ export function AdminDashboard({
                                     customerAddress: item.customerAddress,
                                     customerCep: item.customerCep,
                                     productSummary: item.productSummary,
-                                    cityState: draft.destinationCityState,
-                                    originCityState: draft.originCityState,
-                                    destinationCityState: draft.destinationCityState,
-                                    currentLocation: draft.currentLocation,
+                                    cityState: destCity,
+                                    originCityState:
+                                      draft.originCityState.trim() ||
+                                      item.originCityState ||
+                                      'Curitiba - PR',
+                                    destinationCityState: destCity,
+                                    currentLocation:
+                                      draft.currentLocation.trim() ||
+                                      draft.originCityState.trim() ||
+                                      'Curitiba - PR',
                                     routeProgress: draft.routeProgress,
                                     invoiceNumber: item.invoiceNumber,
                                     orderTotal: item.orderTotal,
                                     weightKg: item.weightKg,
-                                    shippingLabel: draft.shippingLabel,
+                                    shippingLabel:
+                                      draft.shippingLabel.trim() ||
+                                      item.shippingLabel ||
+                                      'Correios SEDEX • Brasil Tech Express',
                                     statusStep: draft.statusStep,
                                     statusNote: draft.statusNote,
                                     active: draft.active,
                                   });
+                                  setTrackingRulesWarning(false);
+                                  syncSavedTrackingIntoState(saved);
                                   onNotify(
                                     draft.active
-                                      ? `Caminhão & rastreio ${item.code} liberados ao vivo!`
+                                      ? `Caminhão & rastreio ${item.code} salvos ao vivo!`
                                       : `Rastreio ${item.code} salvo como oculto.`
                                   );
                                 } catch (err) {
@@ -2563,15 +2787,6 @@ export function AdminDashboard({
               )}
             </div>
           </div>
-
-          {docModalState && (
-            <TrackingDocumentsModal
-              tracking={docModalState.tracking}
-              storeSettings={storeSettings}
-              initialTab={docModalState.tab}
-              onClose={() => setDocModalState(null)}
-            />
-          )}
         </div>
       )}
 
@@ -2659,9 +2874,8 @@ export function AdminDashboard({
               )}
             </div>
 
-            {isBootstrappedAdmin && (
-              <div className="checkout-card">
-                <h2>Equipe Administradora</h2>
+            <div className="checkout-card">
+              <h2>Equipe Administradora</h2>
                 <form className="admin-coupon-form" onSubmit={handleAddAdmin}>
                   <input
                     type="text"
@@ -2720,7 +2934,6 @@ export function AdminDashboard({
                   ))}
                 </div>
               </div>
-            )}
           </div>
         </div>
       )}
@@ -3474,6 +3687,16 @@ export function AdminDashboard({
             </div>
           </div>
         </div>
+      )}
+
+      {docModalState && (
+        <TrackingDocumentsModal
+          tracking={docModalState.tracking}
+          storeSettings={storeSettings}
+          initialTab={docModalState.tab}
+          onClose={() => setDocModalState(null)}
+          onNotify={onNotify}
+        />
       )}
     </section>
   );

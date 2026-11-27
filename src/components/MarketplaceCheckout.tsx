@@ -22,6 +22,8 @@ import {
   PersistedCoupon,
   PersistedTracking,
   StoreSettings,
+  TRACKING_STAGE_DESCRIPTIONS,
+  TRACKING_STAGE_LABELS,
   isValidTrackingCodeFormat,
   normalizeTrackingLookupInput,
   subscribeLiveTrackingByCode,
@@ -947,10 +949,10 @@ export function CheckoutView({
 
             <div className="checkout-cta-stack">
               {mpConfigured && (
-                <div className="border border-blue-200 bg-blue-50/70 rounded-xl p-4 space-y-3">
-                  <div className="flex items-center justify-between text-xs font-bold text-slate-900">
+                <div className="border border-lime-300 bg-lime-50/70 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between text-xs font-bold text-zinc-950">
                     <span>PIX Oficial Mercado Pago</span>
-                    <span className="text-blue-700">Confirmação automática</span>
+                    <span className="text-lime-800">Confirmação automática</span>
                   </div>
 
                   {mpPaidOrderCode ? (
@@ -1095,13 +1097,7 @@ interface OrdersTrackingViewProps {
   onNotify?: (msg: string) => void;
 }
 
-const TIMELINE_STEPS = [
-  'Pedido confirmado',
-  'Em separação e testes',
-  'Em transporte',
-  'Saiu para entrega',
-  'Entregue',
-];
+const TIMELINE_STEPS = [...TRACKING_STAGE_LABELS];
 
 export function OrdersTrackingView({
   orders,
@@ -1243,6 +1239,28 @@ export function OrdersTrackingView({
           )}
         </form>
 
+        {!searchedCode && (
+          <div className="tracking-stages-overview">
+            <div className="tracking-stages-overview-head">
+              <strong>Etapas do acompanhamento em tempo real</strong>
+              <span>Atualização automática da central Brasil Tech até a entrega</span>
+            </div>
+            <div className="order-timeline is-preview">
+              {TIMELINE_STEPS.map((step, idx) => (
+                <div key={step} className="timeline-step is-preview-step">
+                  <span className="dot">{idx + 1}</span>
+                  <div className="timeline-step-copy">
+                    <small>{step}</small>
+                    <span className="timeline-step-desc">
+                      {TRACKING_STAGE_DESCRIPTIONS[idx]}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {searchedCode && !searching && (
           <div className="tracking-result-area">
             {foundTracking ? (
@@ -1288,7 +1306,7 @@ export function OrdersTrackingView({
                     </small>
                   </div>
                   <div className="tracking-status-badge">
-                    {TIMELINE_STEPS[foundTracking.statusStep] || 'Confirmado'}
+                    {TIMELINE_STEPS[foundTracking.statusStep] || 'Pedido em logística'}
                   </div>
                 </div>
 
@@ -1300,6 +1318,45 @@ export function OrdersTrackingView({
                     )}
                   </div>
                 )}
+
+                <div className="tracking-stage-section">
+                  <div className="tracking-stage-section-head">
+                    <strong>Etapas do envio</strong>
+                    <span>
+                      Etapa {foundTracking.statusStep + 1} de {TIMELINE_STEPS.length} •{' '}
+                      {TIMELINE_STEPS[foundTracking.statusStep]}
+                    </span>
+                  </div>
+                  <div className="order-timeline">
+                    {TIMELINE_STEPS.map((step, idx) => {
+                      const isDone = idx < foundTracking.statusStep || foundTracking.statusStep === 4;
+                      const isCurrent = idx === foundTracking.statusStep && foundTracking.statusStep < 4;
+                      return (
+                        <div
+                          key={step}
+                          className={`timeline-step ${
+                            isDone ? 'done' : ''
+                          } ${isCurrent ? 'done current' : ''}`}
+                        >
+                          <span className="dot">{idx <= foundTracking.statusStep ? '✓' : idx + 1}</span>
+                          <div className="timeline-step-copy">
+                            <small>{step}</small>
+                            <span className="timeline-step-state">
+                              {isCurrent
+                                ? 'Etapa atual'
+                                : idx <= foundTracking.statusStep
+                                ? 'Concluído'
+                                : 'Aguardando'}
+                            </span>
+                            <span className="timeline-step-desc">
+                              {TRACKING_STAGE_DESCRIPTIONS[idx]}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
 
                 <LiveTrackingMap
                   originCityState={foundTracking.originCityState || 'Curitiba - PR'}
@@ -1315,19 +1372,7 @@ export function OrdersTrackingView({
                   updatedAtLabel={foundTracking.updatedAtLabel || foundTracking.createdAtLabel}
                 />
 
-                <div className="order-timeline" style={{ marginTop: 14 }}>
-                  {TIMELINE_STEPS.map((step, idx) => (
-                    <div
-                      key={step}
-                      className={`timeline-step ${idx <= foundTracking.statusStep ? 'done' : ''}`}
-                    >
-                      <span className="dot">{idx <= foundTracking.statusStep ? '✓' : idx + 1}</span>
-                      <small>{step}</small>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="order-card-footer">
+                <div className="order-card-footer" style={{ marginTop: 14 }}>
                   <span>🚚 Modalidade: {foundTracking.shippingLabel}</span>
                   <span>
                     🕒 Atualizado em {foundTracking.updatedAtLabel || foundTracking.createdAtLabel}
@@ -1358,6 +1403,7 @@ export function OrdersTrackingView({
           storeSettings={storeSettings}
           initialTab={docModalTab}
           onClose={() => setDocModalTab(null)}
+          onNotify={onNotify}
         />
       )}
 

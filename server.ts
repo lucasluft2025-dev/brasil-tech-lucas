@@ -3,8 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  ADMIN_EMAILS,
+  getExpectedAdminSessionToken,
   isBootstrappedAdminEmail,
   isValidAdminSessionToken,
+  validateAdminPasswordLogin,
 } from './src/lib/adminSession.ts';
 
 interface StoredTracking {
@@ -48,24 +51,39 @@ function readFirebaseApiKey(): string {
 
 const FIREBASE_API_KEY = readFirebaseApiKey();
 
-function resolveStorageFile(): string {
+function resolveWritableDataFile(fileName: string, tmpName: string, defaultContent: string): string {
   const localDir = path.join(__dirname, '.data');
+  const tmpPath = path.join('/tmp', tmpName);
   try {
     if (!fs.existsSync(localDir)) {
       fs.mkdirSync(localDir, { recursive: true });
     }
-    const testPath = path.join(localDir, 'trackings.json');
+    const testPath = path.join(localDir, fileName);
     if (!fs.existsSync(testPath)) {
-      fs.writeFileSync(testPath, '{}', 'utf8');
+      fs.writeFileSync(testPath, defaultContent, 'utf8');
     }
+    fs.accessSync(testPath, fs.constants.W_OK);
     return testPath;
   } catch {
-    const tmpPath = '/tmp/brasiltech-trackings.json';
-    if (!fs.existsSync(tmpPath)) {
-      fs.writeFileSync(tmpPath, '{}', 'utf8');
+    try {
+      if (!fs.existsSync(tmpPath)) {
+        const localSeedPath = path.join(localDir, fileName);
+        if (fs.existsSync(localSeedPath)) {
+          fs.copyFileSync(localSeedPath, tmpPath);
+        } else {
+          fs.writeFileSync(tmpPath, defaultContent, 'utf8');
+        }
+      }
+      fs.accessSync(tmpPath, fs.constants.W_OK);
+    } catch {
+      // ignore fs fallback error
     }
     return tmpPath;
   }
+}
+
+function resolveStorageFile(): string {
+  return resolveWritableDataFile('trackings.json', 'brasiltech-trackings.json', '{}');
 }
 
 const STORAGE_FILE = resolveStorageFile();
@@ -156,31 +174,49 @@ async function verifyFirebaseAdminBearer(authHeader?: string): Promise<boolean> 
   if (cached && cached.expiresAt > Date.now()) {
     return true;
   }
-  try {
-    const res = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken }),
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const res = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+        }
+      );
+      if (!res.ok) {
+        if (res.status >= 500 && attempt === 0) continue;
+        return false;
       }
-    );
-    if (!res.ok) return false;
-    const data = (await res.json()) as {
-      users?: Array<{ email?: string; emailVerified?: boolean }>;
-    };
-    const user = data.users?.[0];
-    const ok = Boolean(user && isBootstrappedAdminEmail(user.email, user.emailVerified));
-    if (ok && user?.email) {
-      verifiedTokenCache.set(idToken, {
-        email: user.email,
-        expiresAt: Date.now() + 5 * 60 * 1000,
-      });
+      const data = (await res.json()) as {
+        users?: Array<{
+          email?: string;
+          emailVerified?: boolean;
+          providerUserInfo?: Array<{ providerId?: string }>;
+        }>;
+      };
+      const user = data.users?.[0];
+      const normalizedEmail = user?.email?.trim().toLowerCase() || '';
+      const hasGoogleProvider = Boolean(
+        user?.providerUserInfo?.some((p) => p?.providerId === 'google.com')
+      );
+      const ok = Boolean(
+        user &&
+          (isBootstrappedAdminEmail(user.email, user.emailVerified) ||
+            (ADMIN_EMAILS.includes(normalizedEmail) && hasGoogleProvider))
+      );
+      if (ok && user?.email) {
+        verifiedTokenCache.set(idToken, {
+          email: user.email,
+          expiresAt: Date.now() + 5 * 60 * 1000,
+        });
+      }
+      return ok;
+    } catch {
+      if (attempt === 1) return false;
     }
-    return ok;
-  } catch {
-    return false;
   }
+  return false;
 }
 
 async function isAuthorizedAdminRequest(req: express.Request): Promise<boolean> {
@@ -269,21 +305,11 @@ function createEmptyStoreData(): StoreDataFileState {
 }
 
 function resolveStoreDataFile(): string {
-  const localDir = path.join(__dirname, '.data');
-  try {
-    if (!fs.existsSync(localDir)) fs.mkdirSync(localDir, { recursive: true });
-    const filePath = path.join(localDir, 'store_data.json');
-    if (!fs.existsSync(filePath)) {
-      fs.writeFileSync(filePath, JSON.stringify(createEmptyStoreData(), null, 2), 'utf8');
-    }
-    return filePath;
-  } catch {
-    const tmp = '/tmp/brasiltech-store-data.json';
-    if (!fs.existsSync(tmp)) {
-      fs.writeFileSync(tmp, JSON.stringify(createEmptyStoreData(), null, 2), 'utf8');
-    }
-    return tmp;
-  }
+  return resolveWritableDataFile(
+    'store_data.json',
+    'brasiltech-store-data.json',
+    JSON.stringify(createEmptyStoreData(), null, 2)
+  );
 }
 
 const STORE_DATA_FILE = resolveStoreDataFile();
@@ -366,6 +392,24 @@ async function startServer() {
       orderOverrides: storeDataState.orderOverrides,
       updatedAt: storeDataState.updatedAt,
     });
+  });
+
+  // Admin session exchange (allows verified Google Admins or owner password login to obtain X-Admin-Session)
+  app.post('/api/admin/auth/session', async (req, res) => {
+    const body = (req.body || {}) as { email?: string; password?: string };
+    const passwordOk =
+      typeof body.email === 'string' &&
+      typeof body.password === 'string' &&
+      validateAdminPasswordLogin(body.email, body.password);
+    const bearerOk = passwordOk
+      ? true
+      : await isAuthorizedAdminRequest(req);
+    if (!bearerOk) {
+      res.status(401).json({ error: 'Acesso administrativo não autorizado.' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ ok: true, sessionToken: getExpectedAdminSessionToken() });
   });
 
   // Admin full store data (includes wholesale costs & server-recorded orders)
@@ -790,49 +834,58 @@ async function startServer() {
     const body = (req.body || {}) as Partial<StoredTracking>;
     const cleanCode = sanitizeTrackingCode(body.code);
     if (!isValidCode(cleanCode)) {
-      res.status(400).json({ error: 'Código de rastreio inválido.' });
+      res.status(400).json({ error: 'Código de rastreio inválido. Use ao menos 3 letras ou números.' });
       return;
     }
-    const customerLabel = String(body.customerLabel || '').trim().slice(0, 80);
-    const productSummary = String(body.productSummary || '').trim().slice(0, 240);
-    const dest = String(body.destinationCityState || body.cityState || '').trim().slice(0, 120);
-    if (!customerLabel || !productSummary || !dest) {
-      res.status(400).json({ error: 'Cliente, produto e destino são obrigatórios.' });
-      return;
-    }
+    const customerLabel = (String(body.customerLabel || '').trim() || 'Cliente Brasil Tech').slice(0, 80);
+    const productSummary = (String(body.productSummary || '').trim() || 'Pedido Brasil Tech').slice(0, 240);
+    const rawDest = String(body.destinationCityState || body.cityState || '').trim();
+    const dest = (rawDest.length >= 2 ? rawDest : 'São Paulo - SP').slice(0, 120);
 
     const existing = trackingStore.get(cleanCode);
     const nowLabel = new Date().toLocaleString('pt-BR').slice(0, 60);
-    const statusStep = Math.min(4, Math.max(0, Math.round(Number(body.statusStep) || 0)));
-    const origin = String(body.originCityState || 'Curitiba - PR').trim().slice(0, 120);
+    const parsedStep = Number(body.statusStep);
+    const statusStep = Math.min(4, Math.max(0, Math.round(Number.isFinite(parsedStep) ? parsedStep : 0)));
+    const origin = String(body.originCityState || existing?.originCityState || 'Curitiba - PR')
+      .trim()
+      .slice(0, 120);
+    const parsedProgress = Number(body.routeProgress ?? existing?.routeProgress ?? 15);
     const routeProgress = Math.min(
       100,
-      Math.max(0, Math.round(Number(body.routeProgress ?? existing?.routeProgress ?? 15)))
+      Math.max(0, Math.round(Number.isFinite(parsedProgress) ? parsedProgress : 15))
     );
+    const parsedOrderTotal = Number(body.orderTotal ?? existing?.orderTotal ?? 0);
+    const safeOrderTotal = Number.isFinite(parsedOrderTotal) ? Math.max(0, parsedOrderTotal) : 0;
+    const parsedWeightKg = Number(body.weightKg ?? existing?.weightKg ?? 1.2);
+    const safeWeightKg = Number.isFinite(parsedWeightKg)
+      ? Math.max(0.1, Math.min(500, parsedWeightKg))
+      : 1.2;
 
     const saved: StoredTracking = {
       code: cleanCode,
-      orderCode: String(body.orderCode || '').trim().slice(0, 40),
+      orderCode: String(body.orderCode || existing?.orderCode || '').trim().slice(0, 40),
       customerLabel,
-      maskedCpf: String(body.maskedCpf || '').trim().slice(0, 30),
-      customerCpf: String(body.customerCpf || '').trim().slice(0, 30),
-      customerPhone: String(body.customerPhone || '').trim().slice(0, 30),
-      customerAddress: String(body.customerAddress || '').trim().slice(0, 300),
-      customerCep: String(body.customerCep || '').trim().slice(0, 20),
+      maskedCpf: String(body.maskedCpf || existing?.maskedCpf || '').trim().slice(0, 30),
+      customerCpf: String(body.customerCpf || existing?.customerCpf || '').trim().slice(0, 30),
+      customerPhone: String(body.customerPhone || existing?.customerPhone || '').trim().slice(0, 30),
+      customerAddress: String(body.customerAddress || existing?.customerAddress || '').trim().slice(0, 300),
+      customerCep: String(body.customerCep || existing?.customerCep || '').trim().slice(0, 20),
       productSummary,
       cityState: dest,
       originCityState: origin || 'Curitiba - PR',
       destinationCityState: dest,
-      currentLocation: String(body.currentLocation || origin || 'Curitiba - PR')
+      currentLocation: String(body.currentLocation || existing?.currentLocation || origin || 'Curitiba - PR')
         .trim()
         .slice(0, 160),
       routeProgress,
       invoiceNumber: String(body.invoiceNumber || existing?.invoiceNumber || '')
         .trim()
         .slice(0, 40),
-      orderTotal: Math.max(0, Number(body.orderTotal || 0)),
-      weightKg: Math.max(0.1, Math.min(500, Number(body.weightKg || 1.2))),
-      shippingLabel: String(body.shippingLabel || 'Correios SEDEX • Brasil Tech Express')
+      orderTotal: safeOrderTotal,
+      weightKg: safeWeightKg,
+      shippingLabel: String(
+        body.shippingLabel || existing?.shippingLabel || 'Correios SEDEX • Brasil Tech Express'
+      )
         .trim()
         .slice(0, 120),
       statusStep,
@@ -863,19 +916,11 @@ async function startServer() {
   });
 
   // --- Shared Storefront Banners & Categories Config (Admin-editable, zero-code) ---
-  const storefrontConfigFile = (() => {
-    const localDir = path.join(__dirname, '.data');
-    try {
-      if (!fs.existsSync(localDir)) fs.mkdirSync(localDir, { recursive: true });
-      const filePath = path.join(localDir, 'storefront_content.json');
-      if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, '{}', 'utf8');
-      return filePath;
-    } catch {
-      const tmp = '/tmp/brasiltech-storefront-content.json';
-      if (!fs.existsSync(tmp)) fs.writeFileSync(tmp, '{}', 'utf8');
-      return tmp;
-    }
-  })();
+  const storefrontConfigFile = resolveWritableDataFile(
+    'storefront_content.json',
+    'brasiltech-storefront-content.json',
+    '{}'
+  );
 
   let storefrontContentCache: {
     banners?: unknown[];
@@ -950,19 +995,11 @@ async function startServer() {
     updatedAt: string;
   }
 
-  const mpPaymentsFile = (() => {
-    const localDir = path.join(__dirname, '.data');
-    try {
-      if (!fs.existsSync(localDir)) fs.mkdirSync(localDir, { recursive: true });
-      const filePath = path.join(localDir, 'mp_payments.json');
-      if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, '{}', 'utf8');
-      return filePath;
-    } catch {
-      const tmp = '/tmp/brasiltech-mp-payments.json';
-      if (!fs.existsSync(tmp)) fs.writeFileSync(tmp, '{}', 'utf8');
-      return tmp;
-    }
-  })();
+  const mpPaymentsFile = resolveWritableDataFile(
+    'mp_payments.json',
+    'brasiltech-mp-payments.json',
+    '{}'
+  );
 
   const mpPaymentStore = new Map<string, StoredMpPayment>();
   try {
